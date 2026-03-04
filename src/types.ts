@@ -39,7 +39,7 @@ export const isLocalModel = (model: ModelInfo): model is LocalModelInfo =>
 
 export type RecordingMode = 'toggle' | 'push_to_talk';
 export type PillIndicatorMode = 'never' | 'always' | 'when_recording';
-export type PillIndicatorPosition = 'top' | 'center' | 'bottom';
+export type PillIndicatorPosition = 'top-left' | 'top-center' | 'top-right' | 'bottom-left' | 'bottom-center' | 'bottom-right';
 
 export interface AppSettings {
   hotkey: string;
@@ -65,6 +65,10 @@ export interface AppSettings {
   pill_indicator_mode?: PillIndicatorMode;
   // Pill indicator screen position
   pill_indicator_position?: PillIndicatorPosition;
+  // Pill indicator offset from screen edge in pixels (10-100)
+  pill_indicator_offset?: number;
+  // Pause system media during recording
+  pause_media_during_recording?: boolean;
   // Network sharing settings
   sharing_port?: number;
   sharing_password?: string;

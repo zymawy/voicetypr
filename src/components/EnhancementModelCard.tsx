@@ -28,7 +28,6 @@ export function EnhancementModelCard({
   onRemoveApiKey,
 }: EnhancementModelCardProps) {
   const providers: Record<string, { name: string; color: string }> = {
-    groq: { name: 'Groq', color: 'text-orange-600' },
     gemini: { name: 'Gemini', color: 'text-blue-600' },
     openai: { name: 'OpenAI', color: 'text-green-600' }
   };

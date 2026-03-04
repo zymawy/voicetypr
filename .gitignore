@@ -57,3 +57,4 @@ opencodetmp
 
 # bv (beads viewer) local config and caches
 .bv/
+pi-session-*.html

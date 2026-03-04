@@ -107,6 +107,7 @@ async fn test_server_starts_successfully() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await;
 
@@ -126,6 +127,7 @@ async fn test_server_is_running_after_start() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -146,6 +148,7 @@ async fn test_server_reports_correct_port_after_start() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -166,6 +169,7 @@ async fn test_server_stores_config_after_start() {
             PathBuf::from("/models/large.bin"),
             "large-v3".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -194,6 +198,7 @@ async fn test_server_status_enabled_after_start() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -215,6 +220,7 @@ async fn test_server_status_has_correct_port() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -236,6 +242,7 @@ async fn test_server_status_has_correct_model_name() {
             PathBuf::from("/fake/model.bin"),
             "my-whisper-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -257,6 +264,7 @@ async fn test_server_status_has_correct_server_name() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -278,6 +286,7 @@ async fn test_server_status_has_password_when_set() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -299,6 +308,7 @@ async fn test_server_status_no_password_when_not_set() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -324,6 +334,7 @@ async fn test_server_stop_sets_not_running() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -344,6 +355,7 @@ async fn test_server_stop_clears_port() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -364,6 +376,7 @@ async fn test_server_stop_clears_config() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -384,6 +397,7 @@ async fn test_server_status_disabled_after_stop() {
             PathBuf::from("/fake/model.bin"),
             "test-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -422,6 +436,7 @@ async fn test_port_can_be_reused_after_stop() {
             PathBuf::from("/fake/model.bin"),
             "model1".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -439,6 +454,7 @@ async fn test_port_can_be_reused_after_stop() {
             PathBuf::from("/fake/model.bin"),
             "model2".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await;
 
@@ -459,6 +475,7 @@ async fn test_different_ports_work() {
             PathBuf::from("/fake/model.bin"),
             "model1".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -471,6 +488,7 @@ async fn test_different_ports_work() {
             PathBuf::from("/fake/model.bin"),
             "model2".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -498,6 +516,7 @@ async fn test_update_model_changes_model_name() {
             PathBuf::from("/models/old.bin"),
             "old-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -525,6 +544,7 @@ async fn test_update_model_changes_model_path() {
             PathBuf::from("/models/old.bin"),
             "old-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -552,6 +572,7 @@ async fn test_update_model_status_reflects_change() {
             PathBuf::from("/models/old.bin"),
             "old-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -597,6 +618,7 @@ async fn test_update_model_with_different_engine() {
             PathBuf::from("/models/whisper.bin"),
             "whisper-model".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -631,6 +653,7 @@ async fn test_three_consecutive_start_stop_cycles() {
                 PathBuf::from("/fake/model.bin"),
                 format!("model-{}", i),
                 "whisper".to_string(),
+                None,
             )
             .await
             .unwrap();
@@ -659,6 +682,7 @@ async fn test_start_while_running_stops_previous() {
             PathBuf::from("/models/model1.bin"),
             "model1".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -675,6 +699,7 @@ async fn test_start_while_running_stops_previous() {
             PathBuf::from("/models/model2.bin"),
             "model2".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -702,6 +727,7 @@ async fn test_rapid_start_stop_cycles() {
                 PathBuf::from("/fake/model.bin"),
                 "test".to_string(),
                 "whisper".to_string(),
+                None,
             )
             .await
             .unwrap();
@@ -736,6 +762,7 @@ async fn test_state_transition_new_to_running() {
             PathBuf::from("/fake/model.bin"),
             "test".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -759,6 +786,7 @@ async fn test_state_transition_running_to_stopped() {
             PathBuf::from("/fake/model.bin"),
             "test".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -788,6 +816,7 @@ async fn test_state_transition_running_to_running_different_config() {
             PathBuf::from("/models/a.bin"),
             "model-a".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -804,6 +833,7 @@ async fn test_state_transition_running_to_running_different_config() {
             PathBuf::from("/models/b.bin"),
             "model-b".to_string(),
             "parakeet".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -888,6 +918,7 @@ fn test_sharing_status_serializes_correctly() {
         server_name: Some("Test Server".to_string()),
         active_connections: 5,
         password: Some("secret".to_string()),
+        binding_results: vec![],
     };
 
     let json = serde_json::to_string(&status).unwrap();
@@ -908,6 +939,7 @@ fn test_sharing_status_disabled_serializes_correctly() {
         server_name: None,
         active_connections: 0,
         password: None,
+        binding_results: vec![],
     };
 
     let json = serde_json::to_string(&status).unwrap();
@@ -939,6 +971,7 @@ async fn test_start_on_occupied_port_behavior() {
             PathBuf::from("/fake/model.bin"),
             "test".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await;
 
@@ -962,6 +995,7 @@ async fn test_empty_server_name_works() {
             PathBuf::from("/fake/model.bin"),
             "test".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await;
 
@@ -982,6 +1016,7 @@ async fn test_empty_model_name_works() {
             PathBuf::from("/fake/model.bin"),
             "".to_string(), // Empty model name
             "whisper".to_string(),
+            None,
         )
         .await;
 
@@ -1002,6 +1037,7 @@ async fn test_empty_password_string_is_some() {
             PathBuf::from("/fake/model.bin"),
             "test".to_string(),
             "whisper".to_string(),
+            None,
         )
         .await
         .unwrap();

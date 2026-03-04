@@ -9,9 +9,38 @@ use std::time::Duration;
 pub struct OpenAIProvider {
     api_key: String,
     model: String,
-    client: Client,
     base_url: String,
     options: HashMap<String, serde_json::Value>,
+}
+
+pub(crate) fn model_uses_max_completion_tokens(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    normalized.starts_with("gpt-5")
+        || normalized.starts_with("o1")
+        || normalized.starts_with("o3")
+        || normalized.starts_with("o4")
+}
+
+pub(crate) fn is_unsupported_token_parameter_error(
+    error_text: &str,
+    parameter_name: &str,
+) -> bool {
+    let haystack = error_text.to_ascii_lowercase();
+    let parameter = parameter_name.to_ascii_lowercase();
+    let unsupported_single = format!("unsupported parameter: '{}'", parameter);
+    let unsupported_double = format!("unsupported parameter: \"{}\"", parameter);
+    let param_field = format!("\"param\":\"{}\"", parameter);
+
+    haystack.contains(&unsupported_single)
+        || haystack.contains(&unsupported_double)
+        || haystack.contains(&param_field)
+}
+
+fn is_unsupported_temperature_value_error(error_text: &str) -> bool {
+    let haystack = error_text.to_ascii_lowercase();
+    haystack.contains("unsupported value")
+        && haystack.contains("temperature")
+        && (haystack.contains("default") || haystack.contains("only"))
 }
 
 impl OpenAIProvider {
@@ -29,18 +58,11 @@ impl OpenAIProvider {
             .unwrap_or(false);
 
         // Validate API key format (basic check) only if auth is required
-        if !no_auth {
-            if api_key.trim().is_empty() || api_key.len() < MIN_API_KEY_LENGTH {
-                return Err(AIError::ValidationError(
-                    "Invalid API key format".to_string(),
-                ));
-            }
+        if !no_auth && (api_key.trim().is_empty() || api_key.len() < MIN_API_KEY_LENGTH) {
+            return Err(AIError::ValidationError(
+                "Invalid API key format".to_string(),
+            ));
         }
-
-        let client = Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| AIError::NetworkError(format!("Failed to create HTTP client: {}", e)))?;
 
         // Resolve base URL: expect versioned base (e.g., https://api.openai.com/v1) and append only /chat/completions
         let base_root = options
@@ -59,10 +81,16 @@ impl OpenAIProvider {
         Ok(Self {
             api_key,
             model,
-            client,
             base_url,
             options,
         })
+    }
+
+    fn create_http_client() -> Result<Client, AIError> {
+        Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| AIError::NetworkError(format!("Failed to create HTTP client: {}", e)))
     }
 
     async fn make_request_with_retry(
@@ -102,8 +130,9 @@ impl OpenAIProvider {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let mut req = self
-            .client
+        let client = Self::create_http_client()?;
+
+        let mut req = client
             .post(&self.base_url)
             .header("Content-Type", "application/json")
             .json(request);
@@ -141,7 +170,7 @@ impl OpenAIProvider {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct OpenAIRequest {
     model: String,
     messages: Vec<Message>,
@@ -149,9 +178,14 @@ struct OpenAIRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    /// For GPT-5 models: set reasoning effort to minimal for fast text formatting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Message {
     role: String,
     content: String,
@@ -179,6 +213,7 @@ impl AIProvider for OpenAIProvider {
             &request.text,
             request.context.as_deref(),
             &request.options.unwrap_or_default(),
+            request.language.as_deref(),
         );
 
         let temperature = self
@@ -194,7 +229,16 @@ impl AIProvider for OpenAIProvider {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
-        let request_body = OpenAIRequest {
+        let use_max_completion_tokens = model_uses_max_completion_tokens(&self.model);
+
+        // For GPT-5 models, use minimal reasoning effort for fast text formatting
+        let reasoning_effort = if self.model.starts_with("gpt-5") {
+            Some("minimal".to_string())
+        } else {
+            None
+        };
+
+        let mut request_body = OpenAIRequest {
             model: self.model.clone(),
             messages: vec![
                 Message {
@@ -206,11 +250,76 @@ impl AIProvider for OpenAIProvider {
                     content: prompt,
                 },
             ],
-            temperature: Some(temperature.clamp(0.0, 2.0)),
-            max_tokens,
+            temperature: if use_max_completion_tokens {
+                None
+            } else {
+                Some(temperature.clamp(0.0, 2.0))
+            },
+            max_tokens: if use_max_completion_tokens {
+                None
+            } else {
+                max_tokens
+            },
+            max_completion_tokens: if use_max_completion_tokens {
+                max_tokens
+            } else {
+                None
+            },
+            reasoning_effort,
         };
 
-        let api_response = self.make_request_with_retry(&request_body).await?;
+        let mut api_response = None;
+        let mut attempts = 0;
+        while attempts < 3 {
+            attempts += 1;
+
+            match self.make_request_with_retry(&request_body).await {
+                Ok(response) => {
+                    api_response = Some(response);
+                    break;
+                }
+                Err(AIError::ApiError(error_text)) => {
+                    if request_body.temperature.is_some()
+                        && is_unsupported_temperature_value_error(&error_text)
+                    {
+                        log::warn!(
+                            "OpenAI temperature override unsupported for model '{}'; retrying with default temperature",
+                            self.model
+                        );
+                        request_body.temperature = None;
+                        continue;
+                    }
+
+                    if max_tokens.is_some() {
+                        let attempted_param = if request_body.max_completion_tokens.is_some() {
+                            "max_completion_tokens"
+                        } else {
+                            "max_tokens"
+                        };
+
+                        if is_unsupported_token_parameter_error(&error_text, attempted_param) {
+                            log::warn!(
+                                "OpenAI token parameter '{}' unsupported for model '{}'; retrying with alternate parameter",
+                                attempted_param,
+                                self.model
+                            );
+                            std::mem::swap(
+                                &mut request_body.max_tokens,
+                                &mut request_body.max_completion_tokens,
+                            );
+                            continue;
+                        }
+                    }
+
+                    return Err(AIError::ApiError(error_text));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let api_response = api_response.ok_or_else(|| {
+            AIError::ApiError("Failed OpenAI request after compatibility retries".to_string())
+        })?;
 
         let enhanced_text = api_response
             .choices
@@ -263,5 +372,34 @@ mod tests {
             HashMap::new(),
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_model_uses_max_completion_tokens() {
+        assert!(model_uses_max_completion_tokens("gpt-5"));
+        assert!(model_uses_max_completion_tokens("gpt-5-mini"));
+        assert!(model_uses_max_completion_tokens("o1"));
+        assert!(model_uses_max_completion_tokens("o1-mini"));
+        assert!(model_uses_max_completion_tokens("o3-mini"));
+        assert!(model_uses_max_completion_tokens("o4-mini"));
+
+        assert!(!model_uses_max_completion_tokens("gpt-4o"));
+        assert!(!model_uses_max_completion_tokens("gpt-4.1"));
+    }
+
+    #[test]
+    fn test_unsupported_token_parameter_error_detection() {
+        let error = "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.";
+        assert!(is_unsupported_token_parameter_error(error, "max_tokens"));
+        assert!(!is_unsupported_token_parameter_error(error, "max_completion_tokens"));
+    }
+
+    #[test]
+    fn test_unsupported_temperature_value_error_detection() {
+        let error = "Unsupported value: 'temperature' does not support 0 with this model. Only the default (1) value is supported.";
+        assert!(is_unsupported_temperature_value_error(error));
+        assert!(!is_unsupported_temperature_value_error(
+            "Unsupported parameter: 'max_tokens'"
+        ));
     }
 }

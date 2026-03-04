@@ -39,7 +39,9 @@ mod tests {
             play_sound_on_recording: true,
             play_sound_on_recording_end: true,
             pill_indicator_mode: "when_recording".to_string(),
-            pill_indicator_position: "bottom".to_string(),
+            pill_indicator_position: "bottom-center".to_string(),
+            pill_indicator_offset: 10,
+            pause_media_during_recording: true,
             sharing_port: Some(47842),
             sharing_password: None,
             save_recordings: true,
@@ -104,7 +106,9 @@ mod tests {
             play_sound_on_recording: false,
             play_sound_on_recording_end: false,
             pill_indicator_mode: "never".to_string(),
-            pill_indicator_position: "top".to_string(),
+            pill_indicator_position: "top-center".to_string(),
+            pill_indicator_offset: 25,
+            pause_media_during_recording: true,
             sharing_port: None,
             sharing_password: Some("test123".to_string()),
             save_recordings: true,
@@ -293,7 +297,14 @@ mod tests {
 
     #[test]
     fn test_pill_indicator_position_valid_values() {
-        let valid_positions = vec!["top", "center", "bottom"];
+        let valid_positions = vec![
+            "top-left",
+            "top-center",
+            "top-right",
+            "bottom-left",
+            "bottom-center",
+            "bottom-right",
+        ];
 
         for position in valid_positions {
             let settings = Settings {
@@ -307,21 +318,21 @@ mod tests {
     #[test]
     fn test_pill_indicator_position_default() {
         let settings = Settings::default();
-        assert_eq!(settings.pill_indicator_position, "bottom");
+        assert_eq!(settings.pill_indicator_position, "bottom-center");
     }
 
     #[test]
     fn test_pill_indicator_position_serialization() {
         let settings = Settings {
-            pill_indicator_position: "top".to_string(),
+            pill_indicator_position: "top-center".to_string(),
             ..Settings::default()
         };
 
         let json = serde_json::to_string(&settings).unwrap();
-        assert!(json.contains("\"pill_indicator_position\":\"top\""));
+        assert!(json.contains("\"pill_indicator_position\":\"top-center\""));
 
         let deserialized: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.pill_indicator_position, "top");
+        assert_eq!(deserialized.pill_indicator_position, "top-center");
     }
 
     // ==================== Sound Settings Tests ====================
@@ -665,7 +676,9 @@ mod tests {
             play_sound_on_recording: false,
             play_sound_on_recording_end: true,
             pill_indicator_mode: "always".to_string(),
-            pill_indicator_position: "top".to_string(),
+            pill_indicator_position: "top-center".to_string(),
+            pill_indicator_offset: 25,
+            pause_media_during_recording: true,
             sharing_port: Some(12345),
             sharing_password: Some("mysecret".to_string()),
             save_recordings: true,
@@ -717,8 +730,18 @@ mod tests {
             restored.pill_indicator_position,
             original.pill_indicator_position
         );
+        assert_eq!(restored.pill_indicator_offset, original.pill_indicator_offset);
+        assert_eq!(
+            restored.pause_media_during_recording,
+            original.pause_media_during_recording
+        );
         assert_eq!(restored.sharing_port, original.sharing_port);
         assert_eq!(restored.sharing_password, original.sharing_password);
+        assert_eq!(restored.save_recordings, original.save_recordings);
+        assert_eq!(
+            restored.recording_retention_count,
+            original.recording_retention_count
+        );
     }
 
     #[test]
@@ -747,8 +770,12 @@ mod tests {
         assert!(json_value.get("play_sound_on_recording_end").is_some());
         assert!(json_value.get("pill_indicator_mode").is_some());
         assert!(json_value.get("pill_indicator_position").is_some());
+        assert!(json_value.get("pill_indicator_offset").is_some());
+        assert!(json_value.get("pause_media_during_recording").is_some());
         assert!(json_value.get("sharing_port").is_some());
         assert!(json_value.get("sharing_password").is_some());
+        assert!(json_value.get("save_recordings").is_some());
+        assert!(json_value.get("recording_retention_count").is_some());
     }
 
     // ==================== Edge Case Tests ====================

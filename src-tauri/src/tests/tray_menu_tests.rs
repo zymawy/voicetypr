@@ -390,7 +390,7 @@ mod transcription_preview_tests {
     fn test_preview_unicode_chars() {
         let text = "你好世界！这是一个很长的中文句子，需要被截断显示。";
         let result = format_transcription_preview(text);
-        assert_eq!(result.chars().count(), 24); // The text is 24 chars, under 40
+        assert_eq!(result.chars().count(), text.chars().count());
         assert_eq!(result, text);
     }
 

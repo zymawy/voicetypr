@@ -18,7 +18,8 @@ function createMockServer(overrides: Partial<SavedConnection> = {}): SavedConnec
     password: null,
     name: null,
     created_at: Date.now(),
-    model: null,
+    model: "large-v3-turbo",
+    status: "Online",
     ...overrides,
   };
 }
@@ -163,17 +164,7 @@ describe("RemoteServerCard", () => {
     });
 
     it("shows Offline status when server fails to respond", async () => {
-      mockInvoke.mockImplementation((command: string) => {
-        if (command === "get_local_machine_id") {
-          return Promise.resolve("local-machine-456");
-        }
-        if (command === "test_remote_server") {
-          return Promise.reject(new Error("Connection refused"));
-        }
-        return Promise.reject(new Error(`Unknown command: ${command}`));
-      });
-
-      const server = createMockServer();
+      const server = createMockServer({ status: "Offline" });
 
       await act(async () => {
         render(
@@ -193,17 +184,7 @@ describe("RemoteServerCard", () => {
     });
 
     it("shows Auth Failed status when authentication fails", async () => {
-      mockInvoke.mockImplementation((command: string) => {
-        if (command === "get_local_machine_id") {
-          return Promise.resolve("local-machine-456");
-        }
-        if (command === "test_remote_server") {
-          return Promise.reject("Authentication failed: Invalid password");
-        }
-        return Promise.reject(new Error(`Unknown command: ${command}`));
-      });
-
-      const server = createMockServer();
+      const server = createMockServer({ status: "AuthFailed" });
 
       await act(async () => {
         render(
@@ -223,17 +204,7 @@ describe("RemoteServerCard", () => {
     });
 
     it("shows This Machine status for self-connection", async () => {
-      mockInvoke.mockImplementation((command: string) => {
-        if (command === "get_local_machine_id") {
-          return Promise.resolve("same-machine-id");
-        }
-        if (command === "test_remote_server") {
-          return Promise.resolve(createMockStatusResponse({ machine_id: "same-machine-id" }));
-        }
-        return Promise.reject(new Error(`Unknown command: ${command}`));
-      });
-
-      const server = createMockServer();
+      const server = createMockServer({ status: "SelfConnection" });
 
       await act(async () => {
         render(
@@ -336,18 +307,8 @@ describe("RemoteServerCard", () => {
       expect(mockOnSelect).toHaveBeenCalledWith("server-1");
     });
 
-    it("does not call onSelect when clicking card while server is offline", async () => {
-      mockInvoke.mockImplementation((command: string) => {
-        if (command === "get_local_machine_id") {
-          return Promise.resolve("local-machine-456");
-        }
-        if (command === "test_remote_server") {
-          return Promise.reject(new Error("Connection refused"));
-        }
-        return Promise.reject(new Error(`Unknown command: ${command}`));
-      });
-
-      const server = createMockServer();
+    it("still calls onSelect when clicking card while server is offline", async () => {
+      const server = createMockServer({ status: "Offline" });
 
       await act(async () => {
         render(
@@ -370,7 +331,7 @@ describe("RemoteServerCard", () => {
         fireEvent.click(card!);
       });
 
-      expect(mockOnSelect).not.toHaveBeenCalled();
+      expect(mockOnSelect).toHaveBeenCalledWith("server-1");
     });
 
     it("calls onEdit when clicking Edit button", async () => {
@@ -486,17 +447,7 @@ describe("RemoteServerCard", () => {
 
   describe("self-connection handling", () => {
     it("does not allow selection when server is self", async () => {
-      mockInvoke.mockImplementation((command: string) => {
-        if (command === "get_local_machine_id") {
-          return Promise.resolve("same-machine-id");
-        }
-        if (command === "test_remote_server") {
-          return Promise.resolve(createMockStatusResponse({ machine_id: "same-machine-id" }));
-        }
-        return Promise.reject(new Error(`Unknown command: ${command}`));
-      });
-
-      const server = createMockServer();
+      const server = createMockServer({ status: "SelfConnection" });
 
       await act(async () => {
         render(

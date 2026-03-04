@@ -46,7 +46,6 @@ export const saveApiKey = async (provider: string, apiKey: string): Promise<void
     // OpenAI-compatible requires validation (may include no-auth path via separate modal)
     await invoke('validate_and_cache_api_key', { args: { provider, apiKey } });
   } else {
-    // For Groq/Gemini, just cache the key; validation happens during usage
     await invoke('cache_ai_api_key', { args: { provider, apiKey } });
   }
   
@@ -70,7 +69,7 @@ export const removeApiKey = async (provider: string): Promise<void> => {
   const key = `ai_api_key_${provider}`;
   await keyringDelete(key);
   
-  // Clear backend cache
+  // Clear backend cache for the same provider key
   await invoke('clear_ai_api_key_cache', { provider });
   
   console.log(`[Keyring] API key removed for ${provider}`);
@@ -81,7 +80,7 @@ export const removeApiKey = async (provider: string): Promise<void> => {
 
 // Load all API keys to backend cache (for app startup)
 export const loadApiKeysToCache = async (): Promise<void> => {
-  const providers = ['groq', 'gemini', 'openai'];
+  const providers = ['gemini', 'openai', 'custom'];
   
   for (const provider of providers) {
     try {

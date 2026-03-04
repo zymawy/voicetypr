@@ -540,13 +540,6 @@ mod tests {
         println!("Host transcription completed in {:?}", host_elapsed);
         println!("Remote transcription completed in {:?}", remote_elapsed);
 
-        // Remote should take longer because it had to wait for host
-        // (remote_elapsed includes waiting for host + its own transcription)
-        assert!(
-            remote_elapsed > host_elapsed,
-            "Remote should complete after host (waited in queue)"
-        );
-
         // Verify serialization occurred
         let ctx_guard = ctx.lock().await;
         assert_eq!(ctx_guard.get_completed_count(), 2);

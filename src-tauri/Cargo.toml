@@ -1,6 +1,6 @@
 [package]
 name = "voicetypr"
-version = "1.11.2"
+version = "1.12.1"
 description = "open source voice to text transcription app"
 authors = ["moinulmoin"]
 edition = "2021"
@@ -26,7 +26,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-whisper-rs = { version = "0.14.3" }
+whisper-rs = { version = "0.15.1" }
 cpal = "0.16.0"
 hound = "3.5.1"
 symphonia = { version = "0.5", features = ["all"] }
@@ -70,17 +70,26 @@ local-ip-address = "0.6"
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-whisper-rs = { version = "0.14.3", features = ["metal"] }
+whisper-rs = { version = "0.15.1", features = ["metal"] }
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
 tauri-plugin-macos-permissions = "2"
 core-graphics = "0.24"
+media-remote = "0.3"
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+whisper-rs = { version = "0.15.1", features = ["vulkan"] }
+
+[target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
+whisper-rs = { version = "0.15.1" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-whisper-rs = { version = "0.14.3", features = ["vulkan"] }
-windows = { version = "0.51", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Media_Control",
+    "Foundation",
 ] }
 
 [dev-dependencies]

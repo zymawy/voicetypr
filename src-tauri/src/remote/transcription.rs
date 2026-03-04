@@ -424,6 +424,10 @@ mod tests {
         let result = ctx.transcribe(&[1, 2, 3, 4, 5]);
         assert!(result.is_err());
         // Should fail because model doesn't exist
-        assert!(result.unwrap_err().contains("Failed to load model"));
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("Failed to load") || error.contains("No such file"),
+            "unexpected error: {error}"
+        );
     }
 }

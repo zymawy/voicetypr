@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use once_cell::sync::Lazy;
 
 #[derive(Debug, Clone)]
@@ -48,19 +50,8 @@ pub fn get_available_models() -> Vec<&'static ParakeetModelDefinition> {
         return vec![];
     }
 
-    // On Apple Silicon, filter out any models marked as having additional restrictions
-    AVAILABLE_MODELS
-        .iter()
-        .filter(|m| {
-            if m.apple_silicon_only {
-                // This flag is now only for models with extra restrictions beyond base Apple Silicon
-                // (e.g., V2 crashes with SIGFPE in Espresso on some configurations)
-                true
-            } else {
-                true
-            }
-        })
-        .collect()
+    // On Apple Silicon, return all available models
+    AVAILABLE_MODELS.iter().collect()
 }
 
 // Parakeet models using Swift/FluidAudio sidecar
@@ -97,7 +88,7 @@ pub static AVAILABLE_MODELS: Lazy<Vec<ParakeetModelDefinition>> = Lazy::new(|| {
                 },
             ],
             estimated_size: 500_000_000, // FluidAudio CoreML model is ~500MB
-            apple_silicon_only: false,   // No additional restrictions beyond base Apple Silicon requirement
+            apple_silicon_only: false, // No additional restrictions beyond base Apple Silicon requirement
         },
         ParakeetModelDefinition {
             id: "parakeet-tdt-0.6b-v2",

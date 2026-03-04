@@ -176,6 +176,7 @@ fn test_new_with_shared_state() {
         "Shared Server".to_string(),
         Some("password".to_string()),
         shared_state.clone(),
+        None,
     );
 
     assert_eq!(ctx.get_model_name(), "shared-model");
@@ -231,6 +232,7 @@ fn test_context_shared_state_updates_propagate() {
         "Server".to_string(),
         None,
         shared_state.clone(),
+        None,
     );
 
     // Verify initial state
@@ -261,6 +263,7 @@ fn test_context_update_model_affects_shared_state() {
         "Server".to_string(),
         None,
         shared_state.clone(),
+        None,
     );
 
     // Update via context

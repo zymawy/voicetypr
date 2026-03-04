@@ -12,7 +12,7 @@ use crate::commands::remote::{
     get_firewall_status, get_local_ips, get_local_machine_id, open_firewall_settings,
     FirewallStatus, DEFAULT_PORT,
 };
-use crate::remote::settings::{RemoteSettings, SavedConnection};
+use crate::remote::settings::{ConnectionStatus, RemoteSettings, SavedConnection};
 
 // ============================================================================
 // Constants Tests
@@ -475,6 +475,8 @@ fn test_saved_connection_display_name_with_name() {
         name: Some("My Server".to_string()),
         created_at: 0,
         model: None,
+        status: ConnectionStatus::Unknown,
+        last_checked: 0,
     };
     assert_eq!(conn.display_name(), "My Server");
 }
@@ -489,6 +491,8 @@ fn test_saved_connection_display_name_without_name() {
         name: None,
         created_at: 0,
         model: None,
+        status: ConnectionStatus::Unknown,
+        last_checked: 0,
     };
     assert_eq!(conn.display_name(), "192.168.1.100:47842");
 }
@@ -503,6 +507,8 @@ fn test_saved_connection_serialization() {
         name: Some("Test".to_string()),
         created_at: 1234567890,
         model: Some("whisper-large".to_string()),
+        status: ConnectionStatus::Unknown,
+        last_checked: 0,
     };
 
     let json = serde_json::to_string(&conn).unwrap();
@@ -561,6 +567,8 @@ fn test_saved_connection_equality() {
         name: None,
         created_at: 1000,
         model: None,
+        status: ConnectionStatus::Unknown,
+        last_checked: 0,
     };
 
     let conn2 = SavedConnection {
@@ -571,6 +579,8 @@ fn test_saved_connection_equality() {
         name: None,
         created_at: 1000,
         model: None,
+        status: ConnectionStatus::Unknown,
+        last_checked: 0,
     };
 
     assert_eq!(conn1, conn2);
@@ -586,6 +596,8 @@ fn test_saved_connection_inequality() {
         name: None,
         created_at: 1000,
         model: None,
+        status: ConnectionStatus::Unknown,
+        last_checked: 0,
     };
 
     let conn2 = SavedConnection {
@@ -596,6 +608,8 @@ fn test_saved_connection_inequality() {
         name: None,
         created_at: 1000,
         model: None,
+        status: ConnectionStatus::Unknown,
+        last_checked: 0,
     };
 
     assert_ne!(conn1, conn2);

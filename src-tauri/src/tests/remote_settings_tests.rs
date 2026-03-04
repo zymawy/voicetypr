@@ -341,6 +341,8 @@ fn test_saved_connection_equality() {
         name: Some("Test".to_string()),
         created_at: 1000,
         model: None,
+        status: crate::remote::settings::ConnectionStatus::Unknown,
+        last_checked: 0,
     };
 
     let conn2 = crate::remote::settings::SavedConnection {
@@ -351,6 +353,8 @@ fn test_saved_connection_equality() {
         name: Some("Test".to_string()),
         created_at: 1000,
         model: None,
+        status: crate::remote::settings::ConnectionStatus::Unknown,
+        last_checked: 0,
     };
 
     let conn3 = crate::remote::settings::SavedConnection {
@@ -361,6 +365,8 @@ fn test_saved_connection_equality() {
         name: Some("Test".to_string()),
         created_at: 1000,
         model: None,
+        status: crate::remote::settings::ConnectionStatus::Unknown,
+        last_checked: 0,
     };
 
     assert_eq!(conn1, conn2);

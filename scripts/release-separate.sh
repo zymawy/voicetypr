@@ -219,7 +219,7 @@ if [[ "$BUILD_ONLY" == true ]]; then
     fi
     echo -e "${GREEN}✓ Draft release v${NEW_VERSION} exists${NC}"
 else
-    # FULL RELEASE MODE: Bump version, tag, create release
+    # FULL RELEASE MODE: prepare local version for build; publish only after successful build
     
     # Run typecheck first (was in release-it before:init)
     echo -e "${YELLOW}Running typecheck...${NC}"
@@ -253,16 +253,19 @@ else
     esac
     echo -e "${GREEN}New version: ${NEW_VERSION}${NC}"
 
+    # Check tag doesn't already exist before running long build steps
+    if git ls-remote --tags origin | grep -q "refs/tags/v${NEW_VERSION}"; then
+        echo -e "${RED}Error: Tag v${NEW_VERSION} already exists on origin${NC}"
+        exit 1
+    fi
+
     if [[ "$DRY_RUN" == true ]]; then
         echo -e "${BLUE}[DRY RUN] Would bump version: ${CURRENT_VERSION} → ${NEW_VERSION}${NC}"
-        echo -e "${BLUE}[DRY RUN] Would update: package.json, Cargo.toml, CHANGELOG.md${NC}"
-        echo -e "${BLUE}[DRY RUN] Would commit: 'chore: release v${NEW_VERSION}'${NC}"
-        echo -e "${BLUE}[DRY RUN] Would create tag: v${NEW_VERSION}${NC}"
-        echo -e "${BLUE}[DRY RUN] Would push to origin/main${NC}"
-        echo -e "${BLUE}[DRY RUN] Would create draft GitHub release: v${NEW_VERSION}${NC}"
+        echo -e "${BLUE}[DRY RUN] Would update working tree for build: package.json, Cargo.toml${NC}"
         echo -e "${BLUE}[DRY RUN] Would build aarch64-apple-darwin (notarized)${NC}"
         echo -e "${BLUE}[DRY RUN] Would build x86_64-apple-darwin (notarized)${NC}"
-        echo -e "${BLUE}[DRY RUN] Would sign and upload artifacts for both architectures${NC}"
+        echo -e "${BLUE}[DRY RUN] Would sign artifacts and create latest.json${NC}"
+        echo -e "${BLUE}[DRY RUN] Would then generate changelog, commit, tag, push, create draft release, and upload artifacts${NC}"
         echo ""
         echo -e "${GREEN}=== DRY RUN COMPLETE - No changes made ===${NC}"
         exit 0
@@ -275,23 +278,6 @@ else
     # Update Cargo.toml
     echo -e "${YELLOW}Updating Cargo.toml...${NC}"
     sed -i '' "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" src-tauri/Cargo.toml
-
-    # Generate changelog
-    echo -e "${YELLOW}Generating changelog...${NC}"
-    npx conventional-changelog -p angular -i CHANGELOG.md -s
-
-    # Commit, tag, push
-    echo -e "${YELLOW}Committing and tagging...${NC}"
-    git add package.json src-tauri/Cargo.toml CHANGELOG.md
-    git commit -m "chore: release v${NEW_VERSION}"
-    git tag "v${NEW_VERSION}"
-    git push origin main
-    git push origin "v${NEW_VERSION}"
-
-    # Create draft GitHub release
-    echo -e "${YELLOW}Creating draft GitHub release...${NC}"
-    gh release create "v${NEW_VERSION}" --draft --title "VoiceTypr v${NEW_VERSION}" --generate-notes
-    echo -e "${GREEN}✓ Draft release v${NEW_VERSION} created${NC}"
 fi
 
 # Install required Rust targets if not already installed
@@ -321,12 +307,7 @@ sign_update_artifact() {
         fi
         
         # Sign with proper flags (use pnpm tauri, not cargo tauri)
-        if [[ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]]; then
-            pnpm tauri signer sign -f "$KEY_PATH" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$FILE_PATH"
-        else
-            # Try with empty password
-            pnpm tauri signer sign -f "$KEY_PATH" -p "" "$FILE_PATH"
-        fi
+        pnpm tauri signer sign -f "$KEY_PATH" -p "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD-}" "$FILE_PATH"
         
         # Clean up temp file if created
         if [[ -n "${TEMP_KEY:-}" ]] && [[ -f "$TEMP_KEY" ]]; then
@@ -573,7 +554,37 @@ if [[ -n "${X86_64_APP_BUNDLE_PATH}" && -d "$X86_64_APP_BUNDLE_PATH" ]]; then
     }
 fi
 
-# Upload artifacts to the draft GitHub release created by release-it
+if [[ "$BUILD_ONLY" == false ]]; then
+    # Re-check remote state before publishing version/tag
+    git fetch origin main --tags
+    if [[ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ]]; then
+        echo -e "${RED}Error: origin/main advanced during build. Re-run release from latest main.${NC}"
+        exit 1
+    fi
+    if git ls-remote --tags origin | grep -q "refs/tags/v${NEW_VERSION}"; then
+        echo -e "${RED}Error: Tag v${NEW_VERSION} was created while build was running. Re-run release.${NC}"
+        exit 1
+    fi
+
+    # Generate changelog only after successful build/sign verification
+    echo -e "${YELLOW}Generating changelog...${NC}"
+    npx conventional-changelog -p angular -i CHANGELOG.md -s
+
+    # Commit, tag, push
+    echo -e "${YELLOW}Committing and tagging...${NC}"
+    git add package.json src-tauri/Cargo.toml CHANGELOG.md
+    git commit -m "chore: release v${NEW_VERSION}"
+    git tag "v${NEW_VERSION}"
+    git push origin main
+    git push origin "v${NEW_VERSION}"
+
+    # Create draft GitHub release
+    echo -e "${YELLOW}Creating draft GitHub release...${NC}"
+    gh release create "v${NEW_VERSION}" --draft --title "VoiceTypr v${NEW_VERSION}" --generate-notes
+    echo -e "${GREEN}✓ Draft release v${NEW_VERSION} created${NC}"
+fi
+
+# Upload artifacts to the release
 echo -e "${YELLOW}Uploading artifacts to GitHub release v${NEW_VERSION}...${NC}"
 gh release view "v${NEW_VERSION}" >/dev/null
 for file in "$OUTPUT_DIR"/*; do

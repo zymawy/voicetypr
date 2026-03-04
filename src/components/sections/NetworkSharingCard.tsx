@@ -13,6 +13,7 @@ interface BindingResult {
   ip: string;
   success: boolean;
   error: string | null;
+  interface_name?: string;
 }
 
 interface SharingStatus {
@@ -71,19 +72,43 @@ export function NetworkSharingCard() {
   const fetchStatus = useCallback(async () => {
     try {
       const result = await invoke<SharingStatus>("get_sharing_status");
-      setStatus(result);
+      let bindingResults = result.binding_results ?? [];
+
+      if (result.enabled && bindingResults.length === 0) {
+        try {
+          const localIps = await invoke<string[]>("get_local_ips");
+          bindingResults = localIps.map((entry) => {
+            const match = entry.match(/^(.*?) \((.*?)\)$/);
+
+            return {
+              ip: match?.[1] ?? entry,
+              success: true,
+              error: null,
+              interface_name: match?.[2],
+            };
+          });
+        } catch (error) {
+          console.error("Failed to get local IPs:", error);
+        }
+      }
+
+      const normalizedResult = {
+        ...result,
+        binding_results: bindingResults,
+      };
+      setStatus(normalizedResult);
       // Only update port/password from server status when sharing is enabled
       // When disabled, we rely on persisted settings to preserve values
-      if (result.enabled) {
-        if (result.port) {
-          const portStr = result.port.toString();
+      if (normalizedResult.enabled) {
+        if (normalizedResult.port) {
+          const portStr = normalizedResult.port.toString();
           setPort(portStr);
           setSavedPort(portStr);
         }
-        // Populate password from backend when server is running
-        const pwd = result.password || "";
-        setPassword(pwd);
-        setSavedPassword(pwd);
+        if (normalizedResult.password !== undefined) {
+          setPassword(normalizedResult.password || "");
+          setSavedPassword(normalizedResult.password || "");
+        }
       }
     } catch (error) {
       console.error("Failed to get sharing status:", error);
@@ -476,6 +501,11 @@ export function NetworkSharingCard() {
                           <CheckCircle className="h-4 w-4 text-green-500 flex-shrink-0" />
                           <div className="flex-1 px-3 py-2 rounded-md bg-muted/50 border border-green-500/30 font-mono text-sm">
                             <span className="font-semibold">{result.ip}:{port}</span>
+                            {result.interface_name && (
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                ({result.interface_name})
+                              </span>
+                            )}
                           </div>
                           <button
                             onClick={() => copyAddress(result.ip)}
@@ -498,6 +528,11 @@ export function NetworkSharingCard() {
                           <XCircle className="h-4 w-4 text-red-400 flex-shrink-0" />
                           <div className="flex-1 px-3 py-2 rounded-md bg-muted/30 border border-border/30 font-mono text-sm text-muted-foreground">
                             <span>{result.ip}:{port}</span>
+                            {result.interface_name && (
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                ({result.interface_name})
+                              </span>
+                            )}
                             <span className="ml-2 text-xs text-red-400">(bind failed)</span>
                           </div>
                         </div>

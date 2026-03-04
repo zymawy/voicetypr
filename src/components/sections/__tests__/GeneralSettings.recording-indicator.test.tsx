@@ -10,7 +10,8 @@ const baseSettings = {
   play_sound_on_recording: true,
   play_sound_on_recording_end: true,
   pill_indicator_mode: 'when_recording',
-  pill_indicator_position: 'bottom'
+  pill_indicator_position: 'bottom-center',
+  pill_indicator_offset: 10
 };
 
 let mockSettings = { ...baseSettings };
@@ -86,12 +87,16 @@ vi.mock('@/components/ui/toggle-group', () => ({
 
 // Mock Select with interactive behavior
 vi.mock('@/components/ui/select', () => ({
-  Select: ({ children, value, onValueChange: _onValueChange }: {
+  Select: ({ children, value, onValueChange }: {
     children: React.ReactNode;
     value?: string;
     onValueChange?: (value: string) => void;
   }) => (
-    <div data-testid="select" data-value={value}>
+    <div
+      data-testid="select"
+      data-value={value}
+      onClick={() => onValueChange?.('top-center')}
+    >
       {children}
     </div>
   ),
@@ -175,10 +180,36 @@ describe('GeneralSettings recording indicator', () => {
     mockSettings.pill_indicator_mode = 'always';
     render(<GeneralSettings />);
     await waitFor(() => {
-      expect(screen.getByTestId('select-item-top')).toBeInTheDocument();
-      expect(screen.getByTestId('select-item-center')).toBeInTheDocument();
-      expect(screen.getByTestId('select-item-bottom')).toBeInTheDocument();
+      expect(screen.getByTestId('select-item-top-left')).toBeInTheDocument();
+      expect(screen.getByTestId('select-item-top-center')).toBeInTheDocument();
+      expect(screen.getByTestId('select-item-top-right')).toBeInTheDocument();
+      expect(screen.getByTestId('select-item-bottom-left')).toBeInTheDocument();
+      expect(screen.getByTestId('select-item-bottom-center')).toBeInTheDocument();
+      expect(screen.getByTestId('select-item-bottom-right')).toBeInTheDocument();
     });
+  });
+
+  it('calls updateSettings when position is changed', async () => {
+    mockSettings.pill_indicator_mode = 'always';
+    render(<GeneralSettings />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Indicator Position')).toBeInTheDocument();
+    });
+
+    const selects = screen.getAllByTestId('select');
+    const positionSelect = selects.find((select) =>
+      select.getAttribute('data-value')?.includes('center')
+    );
+
+    if (positionSelect) {
+      fireEvent.click(positionSelect);
+      await waitFor(() => {
+        expect(mockUpdateSettings).toHaveBeenCalledWith({
+          pill_indicator_position: 'top-center'
+        });
+      });
+    }
   });
 });
 
@@ -208,6 +239,7 @@ describe('GeneralSettings sound settings', () => {
 
   it('displays sound on recording description', async () => {
     render(<GeneralSettings />);
+
     await waitFor(() => {
       expect(screen.getByText('Play a sound when recording starts')).toBeInTheDocument();
     });
@@ -308,9 +340,6 @@ describe('GeneralSettings sound settings', () => {
     });
   });
 });
-
-// ============================================================================
-// Clipboard Settings Tests
 // ============================================================================
 
 describe('GeneralSettings clipboard settings', () => {
@@ -413,7 +442,15 @@ describe('GeneralSettings UI structure', () => {
   it('displays ESC cancel hint', async () => {
     render(<GeneralSettings />);
     await waitFor(() => {
-      expect(screen.getByText(/twice while recording to cancel/)).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          (_content, node) =>
+            (node?.tagName === 'P' &&
+              node.textContent?.includes(
+                'Press the hotkey to start/stop recording · Press ESC twice to cancel'
+              )) ?? false
+        )
+      ).toBeInTheDocument();
     });
   });
 });
@@ -453,7 +490,13 @@ describe('GeneralSettings recording mode', () => {
     mockSettings.recording_mode = 'toggle';
     render(<GeneralSettings />);
     await waitFor(() => {
-      expect(screen.getByText('Press the hotkey to start/stop recording')).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          (_content, node) =>
+            (node?.tagName === 'P' &&
+              node.textContent?.includes('Press the hotkey to start/stop recording')) ?? false
+        )
+      ).toBeInTheDocument();
     });
   });
 
@@ -508,7 +551,7 @@ describe('GeneralSettings null handling', () => {
       hotkey: 'CommandOrControl+Shift+Space',
       keep_transcription_in_clipboard: false,
       pill_indicator_mode: 'when_recording',
-      pill_indicator_position: 'bottom'
+      pill_indicator_position: 'bottom-center'
       // play_sound_on_recording and play_sound_on_recording_end intentionally omitted
     };
     mockSettings = settingsWithoutSound as typeof mockSettings;
@@ -560,13 +603,16 @@ describe('GeneralSettings settings values', () => {
     });
   });
 
-  it('shows all three position options when indicator is visible', async () => {
+  it('shows all indicator position options when indicator is visible', async () => {
     mockSettings.pill_indicator_mode = 'always';
     render(<GeneralSettings />);
     await waitFor(() => {
-      expect(screen.getByText('Top')).toBeInTheDocument();
-      expect(screen.getByText('Center')).toBeInTheDocument();
-      expect(screen.getByText('Bottom')).toBeInTheDocument();
+      expect(screen.getByText('Top Left')).toBeInTheDocument();
+      expect(screen.getByText('Top Center')).toBeInTheDocument();
+      expect(screen.getByText('Top Right')).toBeInTheDocument();
+      expect(screen.getByText('Bottom Left')).toBeInTheDocument();
+      expect(screen.getByText('Bottom Center')).toBeInTheDocument();
+      expect(screen.getByText('Bottom Right')).toBeInTheDocument();
     });
   });
 });
