@@ -37,12 +37,15 @@ impl RemoteServerConnection {
 
     /// Get the URL for the status endpoint
     pub fn status_url(&self) -> String {
-        format!("http://{}:{}/api/v1/status", self.host, self.port)
+        format!("{}/api/v1/status", format_base_url(&self.host, self.port))
     }
 
     /// Get the URL for the transcribe endpoint
     pub fn transcribe_url(&self) -> String {
-        format!("http://{}:{}/api/v1/transcribe", self.host, self.port)
+        format!(
+            "{}/api/v1/transcribe",
+            format_base_url(&self.host, self.port)
+        )
     }
 
     /// Get a display name for this connection
@@ -58,6 +61,14 @@ pub struct TranscriptionRequest {
     pub audio_data: Vec<u8>,
     /// Source of the audio (affects timeout)
     pub source: TranscriptionSource,
+}
+
+fn format_base_url(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("http://[{}]:{}", host, port)
+    } else {
+        format!("http://{}:{}", host, port)
+    }
 }
 
 impl TranscriptionRequest {

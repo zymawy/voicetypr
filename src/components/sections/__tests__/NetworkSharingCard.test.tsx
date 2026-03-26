@@ -5,13 +5,26 @@ import { ReactNode } from "react";
 
 // Mock Tauri invoke
 const mockInvoke = vi.fn();
+const eventListeners = new Map<string, Array<() => void>>();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
 }));
 
 // Mock Tauri events
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(() => Promise.resolve(() => {})),
+  listen: vi.fn((event: string, callback: () => void) => {
+    const listeners = eventListeners.get(event) ?? [];
+    listeners.push(callback);
+    eventListeners.set(event, listeners);
+
+    return Promise.resolve(() => {
+      const current = eventListeners.get(event) ?? [];
+      eventListeners.set(
+        event,
+        current.filter((listener) => listener !== callback),
+      );
+    });
+  }),
 }));
 
 // Mock sonner toast - using inline object to avoid hoisting issues
@@ -42,6 +55,7 @@ function renderWithProviders(ui: React.ReactElement) {
 describe("NetworkSharingCard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    eventListeners.clear();
   });
 
   describe("when no model is downloaded", () => {
@@ -398,6 +412,58 @@ describe("NetworkSharingCard", () => {
       await waitFor(() => {
         const toggle = screen.getByRole("switch");
         expect(toggle).toBeDisabled();
+      });
+    });
+
+    it("refreshes remote state when sharing-status-changed fires", async () => {
+      let activeRemoteServer: string | null = null;
+
+      mockInvoke.mockImplementation((command: string) => {
+        switch (command) {
+          case "get_settings":
+            return Promise.resolve({
+              current_model: "large-v3-turbo",
+              auto_insert: true,
+              launch_at_startup: false,
+            });
+          case "get_sharing_status":
+            return Promise.resolve({
+              enabled: false,
+              port: null,
+              model_name: null,
+              server_name: null,
+              active_connections: 0,
+            });
+          case "get_local_ips":
+            return Promise.resolve(["192.168.1.100 (eth0)"]);
+          case "get_model_status":
+            return Promise.resolve({
+              models: [
+                { name: "large-v3-turbo", display_name: "Large v3 Turbo", downloaded: true },
+              ],
+            });
+          case "get_active_remote_server":
+            return Promise.resolve(activeRemoteServer);
+          case "get_firewall_status":
+            return Promise.resolve({ firewall_enabled: false, app_allowed: true, may_be_blocked: false });
+          default:
+            return Promise.reject(new Error(`Unknown command: ${command}`));
+        }
+      });
+
+      renderWithProviders(<NetworkSharingCard />);
+
+      await waitFor(() => {
+        expect(screen.getByRole("switch")).not.toBeDisabled();
+      });
+
+      activeRemoteServer = "remote-server-1";
+      for (const listener of eventListeners.get("sharing-status-changed") ?? []) {
+        listener();
+      }
+
+      await waitFor(() => {
+        expect(screen.getByText("Using remote VoiceTypr")).toBeInTheDocument();
       });
     });
   });

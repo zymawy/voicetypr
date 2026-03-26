@@ -1,13 +1,14 @@
 # Test parallel transcription requests to remote server
-# Usage: .\test-parallel-requests.ps1 [-Port 47842] [-NumRequests 5]
+# Usage: .\test-parallel-requests.ps1 -ServerUrl "http://localhost:8765" -NumRequests 10 -ApiKey "mypassword"
 
 param(
-    [int]$Port = 47842,
-    [int]$NumRequests = 5,
+    [string]$ServerUrl = "http://localhost:8765",
+    [int]$NumRequests = 10,
+    [string]$ApiKey = "",
     [string]$AudioFile = "$PSScriptRoot\..\tests\fixtures\audio-files\test-audio-16k.wav"
 )
 
-$serverUrl = "http://localhost:$Port/api/v1/transcribe"
+$serverUrl = "$ServerUrl/api/v1/transcribe"
 
 # Check if audio file exists
 if (-not (Test-Path $AudioFile)) {
@@ -42,7 +43,12 @@ for ($i = 1; $i -le $NumRequests; $i++) {
     $powershell.RunspacePool = $runspacePool
 
     [void]$powershell.AddScript({
-        param($url, $audioBytes, $requestNum)
+        param($url, $audioBytes, $requestNum, $apiKey)
+
+        $headers = @{}
+        if (-not [string]::IsNullOrWhiteSpace($apiKey)) {
+            $headers["X-VoiceTypr-Key"] = $apiKey
+        }
 
         $requestStart = Get-Date
         try {
@@ -50,6 +56,7 @@ for ($i = 1; $i -le $NumRequests; $i++) {
                 -Method POST `
                 -ContentType "audio/wav" `
                 -Body $audioBytes `
+                -Headers $headers `
                 -TimeoutSec 120 `
                 -UseBasicParsing
 
@@ -87,7 +94,7 @@ for ($i = 1; $i -le $NumRequests; $i++) {
     [void]$powershell.AddArgument($serverUrl)
     [void]$powershell.AddArgument($audioBytes)
     [void]$powershell.AddArgument($i)
-
+    [void]$powershell.AddArgument($ApiKey)
     $runspaces += [PSCustomObject]@{
         PowerShell = $powershell
         Handle = $powershell.BeginInvoke()

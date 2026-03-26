@@ -46,8 +46,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Find test executables
-$testExes = Get-ChildItem -Path "target\debug\deps" -Filter "voicetypr_lib-*.exe" |
-    Where-Object { $_.Name -notmatch "\.d$" }
+$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }
+$depsDir = Join-Path $targetDir "debug" "deps"
+if (-not (Test-Path $depsDir)) {
+    Write-Host "Test deps directory not found at $depsDir" -ForegroundColor Red
+    exit 1
+}
+$testExes = Get-ChildItem -Path $depsDir -Filter "voicetypr*-*.exe" |
+    Where-Object { $_.Name -notmatch '\.d$' }
 
 foreach ($exe in $testExes) {
     Write-Host "Embedding manifest into $($exe.Name)..." -ForegroundColor Yellow

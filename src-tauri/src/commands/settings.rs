@@ -1,6 +1,7 @@
 use crate::audio::device_watcher::try_start_device_watcher_if_ready;
 use crate::commands::key_normalizer::{normalize_shortcut_keys, validate_key_combination};
-use crate::commands::remote::save_remote_settings;
+use crate::commands::remote::{resolve_shareable_model_config, save_remote_settings};
+use crate::menu::should_include_remote_connection_in_tray;
 use crate::parakeet::ParakeetManager;
 use crate::remote::lifecycle::RemoteServerManager;
 use crate::remote::settings::RemoteSettings;
@@ -89,8 +90,8 @@ impl Default for Settings {
             pause_media_during_recording: !cfg!(target_os = "macos"),
             sharing_port: Some(47842), // Default network sharing port
             sharing_password: None,    // No password by default
-            save_recordings: true,     // Default to saving recordings
-            recording_retention_count: Some(25), // Default to keeping 25 recordings
+            save_recordings: false,    // Default to not saving recordings
+            recording_retention_count: Some(50), // Default retention when saving is enabled
         }
     }
 }
@@ -156,6 +157,26 @@ pub(crate) fn resolve_pill_indicator_mode(
     }
 
     default_mode
+}
+
+
+pub(crate) fn recording_retention_count_from_store(
+    value: Option<serde_json::Value>,
+) -> Option<u32> {
+    match value {
+        None => Some(50),
+        Some(v) if v.is_null() => None,
+        Some(v) => v.as_u64().map(|n| n as u32).or(Some(50)),
+    }
+}
+
+pub(crate) fn recording_retention_count_to_value(
+    count: Option<u32>,
+) -> serde_json::Value {
+    match count {
+        Some(count) => json!(count),
+        None => serde_json::Value::Null,
+    }
 }
 
 #[tauri::command]
@@ -273,10 +294,9 @@ pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
             .get("save_recordings")
             .and_then(|v| v.as_bool())
             .unwrap_or_else(|| Settings::default().save_recordings),
-        recording_retention_count: store
-            .get("recording_retention_count")
-            .and_then(|v| v.as_u64().map(|n| n as u32))
-            .or(Settings::default().recording_retention_count),
+        recording_retention_count: recording_retention_count_from_store(
+            store.get("recording_retention_count"),
+        ),
     };
 
     Ok(settings)
@@ -384,11 +404,10 @@ pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), Str
 
     // Recording persistence settings
     store.set("save_recordings", json!(settings.save_recordings));
-    if let Some(count) = settings.recording_retention_count {
-        store.set("recording_retention_count", json!(count));
-    } else {
-        store.delete("recording_retention_count");
-    }
+    store.set(
+        "recording_retention_count",
+        recording_retention_count_to_value(settings.recording_retention_count),
+    );
 
     // Save pill position if provided
     if let Some((x, y)) = settings.pill_position {
@@ -785,6 +804,18 @@ pub async fn set_model_from_tray(app: AppHandle, model_name: String) -> Result<(
     if let Some(connection_id) = model_name.strip_prefix("remote_") {
         log::info!("Setting active remote server from tray: {}", connection_id);
 
+        {
+            let remote_state = app.state::<AsyncMutex<RemoteSettings>>();
+            let settings = remote_state.lock().await;
+            let connection = settings
+                .get_connection(connection_id)
+                .ok_or_else(|| format!("Connection '{}' not found", connection_id))?;
+
+            if !should_include_remote_connection_in_tray(&connection.status) {
+                return Err("Cannot select this VoiceTypr instance as a remote server".to_string());
+            }
+        }
+
         // Stop network sharing if enabled (can't share while using remote)
         // and remember that it was active for auto-restore later
         if let Some(server_manager) = app.try_state::<AsyncMutex<RemoteServerManager>>() {
@@ -793,7 +824,7 @@ pub async fn set_model_from_tray(app: AppHandle, model_name: String) -> Result<(
                 drop(manager); // Release lock before calling stop
                 log::info!("🔧 [TRAY] Stopping network sharing - selecting remote server (will remember for auto-restore)");
                 let mut manager = server_manager.lock().await;
-                manager.stop();
+                manager.stop().await;
 
                 // Set flag to remember sharing was active
                 let remote_state = app.state::<AsyncMutex<RemoteSettings>>();
@@ -826,6 +857,10 @@ pub async fn set_model_from_tray(app: AppHandle, model_name: String) -> Result<(
             log::warn!("Failed to emit model-changed event: {}", e);
         }
 
+        if let Err(e) = app.emit("sharing-status-changed", json!({ "refresh": true })) {
+            log::warn!("Failed to emit sharing-status-changed event: {}", e);
+        }
+
         return Ok(());
     }
 
@@ -851,6 +886,10 @@ pub async fn set_model_from_tray(app: AppHandle, model_name: String) -> Result<(
         save_remote_settings(&app, &settings)?;
     }
 
+    if let Err(e) = app.emit("sharing-status-changed", json!({ "refresh": true })) {
+        log::warn!("Failed to emit sharing-status-changed event: {}", e);
+    }
+
     // Restore sharing if it was previously active
     if should_restore_sharing {
         if let Some(server_manager) = app.try_state::<AsyncMutex<RemoteServerManager>>() {
@@ -868,16 +907,22 @@ pub async fn set_model_from_tray(app: AppHandle, model_name: String) -> Result<(
 
             // Determine the engine and model path for the model we're switching to
             let whisper_state = app.state::<tauri::async_runtime::RwLock<WhisperManager>>();
-            let (engine, model_path) = if model_name == "soniox" {
-                ("soniox".to_string(), std::path::PathBuf::new())
+            let engine = if model_name == "soniox" {
+                "soniox".to_string()
             } else {
                 let guard = whisper_state.read().await;
-                let is_whisper = guard.get_models_status().contains_key(&model_name);
-                if is_whisper {
-                    let path = guard.get_model_path(&model_name).unwrap_or_default();
-                    ("whisper".to_string(), path)
+                if guard.get_models_status().contains_key(&model_name) {
+                    "whisper".to_string()
                 } else {
-                    ("parakeet".to_string(), std::path::PathBuf::new())
+                    "parakeet".to_string()
+                }
+            };
+
+            let (model_path, engine) = match resolve_shareable_model_config(&app, &model_name, &engine).await {
+                Ok(config) => config,
+                Err(e) => {
+                    log::warn!("🔧 [TRAY] Skipping auto-restore of network sharing: {}", e);
+                    return Ok(());
                 }
             };
 
@@ -1082,7 +1127,11 @@ pub async fn set_audio_device(app: AppHandle, device_name: Option<String>) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_pill_indicator_mode;
+    use super::{
+        resolve_pill_indicator_mode, recording_retention_count_from_store,
+        recording_retention_count_to_value,
+    };
+    use serde_json::json;
 
     #[test]
     fn resolve_pill_indicator_mode_prefers_new_value() {
@@ -1114,5 +1163,31 @@ mod tests {
         let resolved = resolve_pill_indicator_mode(None, None, "when_recording".to_string());
 
         assert_eq!(resolved, "when_recording");
+    }
+
+    #[test]
+    fn recording_retention_count_missing_key_uses_default() {
+        assert_eq!(recording_retention_count_from_store(None), Some(50));
+    }
+
+    #[test]
+    fn recording_retention_count_null_loads_as_none() {
+        assert_eq!(
+            recording_retention_count_from_store(Some(serde_json::Value::Null)),
+            None
+        );
+    }
+
+    #[test]
+    fn recording_retention_count_numeric_loads_as_some() {
+        assert_eq!(
+            recording_retention_count_from_store(Some(json!(12))),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn recording_retention_count_none_saves_as_null() {
+        assert_eq!(recording_retention_count_to_value(None), serde_json::Value::Null);
     }
 }

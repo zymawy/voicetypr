@@ -426,34 +426,43 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
                             .unwrap_or_else(|| "whisper".to_string());
 
-                        // Get model path from whisper manager
-                        let (current_model, model_path) = {
-                            let manager = whisper_manager.read().await;
+                        // Normalize empty model to first available
+                        let model_name = if stored_model.is_empty() {
+                            let wm = whisper_manager.read().await;
+                            wm.get_first_downloaded_model()
+                                .ok_or("No model downloaded")?
+                        } else {
+                            stored_model
+                        };
 
-                            let model_name = if stored_model.is_empty() {
-                                manager
-                                    .get_first_downloaded_model()
-                                    .ok_or("No model downloaded")?
-                            } else {
-                                stored_model
-                            };
-
-                            // Get model path for whisper, use empty path for other engines
-                            let path = if stored_engine == "whisper" {
-                                manager
-                                    .get_model_path(&model_name)
-                                    .ok_or_else(|| format!("Model '{}' not found", model_name))?
-                            } else {
-                                std::path::PathBuf::new()
-                            };
-
-                            (model_name, path)
+                        // Validate engine and resolve model path using canonical helper
+                        let (model_path, validated_engine) = match crate::commands::remote::resolve_shareable_model_config(
+                            &app_handle_for_sharing,
+                            &model_name,
+                            &stored_engine,
+                        ).await {
+                            Ok(config) => config,
+                            Err(e) => {
+                                // Clear sharing_was_active so we don't retry with bad config
+                                if let Ok(store) = app_handle_for_sharing.store("remote_settings") {
+                                    store.set("sharing_was_active", serde_json::Value::Bool(false));
+                                }
+                                return Err(e);
+                            }
                         };
 
                         // Start the server (pass app handle for Parakeet support)
                         let mut manager = server_manager.lock().await;
                         manager
-                            .start(saved_port, saved_password, server_name, model_path, current_model, stored_engine, Some(app_handle_for_sharing.clone()))
+                            .start(
+                                saved_port,
+                                saved_password,
+                                server_name,
+                                model_path,
+                                model_name,
+                                validated_engine,
+                                Some(app_handle_for_sharing.clone()),
+                            )
                             .await?;
 
                         Ok::<(), String>(())

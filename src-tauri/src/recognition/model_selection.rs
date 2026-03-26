@@ -1,8 +1,9 @@
-use tauri::async_runtime::RwLock as AsyncRwLock;
+use tauri::async_runtime::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use tauri::{Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 
 use crate::parakeet;
+use crate::remote::settings::RemoteSettings;
 use crate::whisper;
 
 /// Snapshot of recognition engine availability
@@ -12,6 +13,7 @@ pub struct RecognitionAvailabilitySnapshot {
     pub parakeet_available: bool,
     pub soniox_selected: bool,
     pub soniox_ready: bool,
+    pub remote_available: bool,
 }
 
 impl RecognitionAvailabilitySnapshot {
@@ -19,6 +21,7 @@ impl RecognitionAvailabilitySnapshot {
         self.whisper_available
             || self.parakeet_available
             || (self.soniox_selected && self.soniox_ready)
+            || self.remote_available
     }
 }
 
@@ -61,11 +64,20 @@ pub async fn recognition_availability_snapshot(
         Err(_) => (false, false),
     };
 
+    let remote_available =
+        if let Some(remote_settings) = app.try_state::<AsyncMutex<RemoteSettings>>() {
+            let settings = remote_settings.lock().await;
+            settings.get_active_connection().is_some()
+        } else {
+            false
+        };
+
     RecognitionAvailabilitySnapshot {
         whisper_available,
         parakeet_available,
         soniox_selected,
         soniox_ready,
+        remote_available,
     }
 }
 
@@ -138,6 +150,15 @@ pub async fn auto_select_model_if_needed(
     }
 
     let Some((engine, model)) = selection else {
+        if availability.remote_available {
+            store.set("onboarding_completed", serde_json::Value::Bool(true));
+            store.save().map_err(|e| e.to_string())?;
+
+            log::info!(
+                "Marked onboarding complete because an active remote server is available"
+            );
+        }
+
         return Ok(());
     };
 
@@ -170,4 +191,35 @@ pub async fn auto_select_model_if_needed(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecognitionAvailabilitySnapshot;
+
+    #[test]
+    fn any_available_is_true_when_remote_is_active() {
+        let snapshot = RecognitionAvailabilitySnapshot {
+            whisper_available: false,
+            parakeet_available: false,
+            soniox_selected: false,
+            soniox_ready: false,
+            remote_available: true,
+        };
+
+        assert!(snapshot.any_available());
+    }
+
+    #[test]
+    fn any_available_is_false_when_nothing_is_ready() {
+        let snapshot = RecognitionAvailabilitySnapshot {
+            whisper_available: false,
+            parakeet_available: false,
+            soniox_selected: false,
+            soniox_ready: false,
+            remote_available: false,
+        };
+
+        assert!(!snapshot.any_available());
+    }
 }

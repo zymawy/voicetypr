@@ -1,7 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { sendNotification, isPermissionGranted, requestPermission } from "@tauri-apps/plugin-notification";
+import { invoke } from "@tauri-apps/api/core";
 import { AppErrorBoundary } from "./ErrorBoundary";
 import { Sidebar } from "./Sidebar";
 import { OnboardingDesktop } from "./onboarding/OnboardingDesktop";
@@ -41,13 +41,24 @@ export function AppContainer() {
 
   // Initialize app
   useEffect(() => {
+    let cancelled = false;
+
+    const handleNoModels = () => {
+      console.log("No models available - redirecting to onboarding");
+      setShowOnboarding(true);
+    };
+
+    window.addEventListener("no-models-available", handleNoModels);
+
+    const timeoutId = window.setTimeout(() => {
+      if (cancelled) return;
+      loadApiKeysToCache().catch((error) => {
+        console.error("Failed to load API keys to cache:", error);
+      });
+    }, 100);
+
     const init = async () => {
       try {
-        // Check if onboarding is completed - only check when settings are loaded
-        if (settings && !settings.onboarding_completed) {
-          setShowOnboarding(true);
-        }
-
         // Run cleanup if enabled
         if (settings?.transcription_cleanup_days) {
           await invoke("cleanup_old_transcriptions", {
@@ -59,30 +70,45 @@ export function AppContainer() {
         if (settings) {
           await updateService.initialize(settings);
         }
+      } catch (error) {
+        console.error("Failed to initialize:", error);
+      }
+    };
 
-        // Load API keys from Stronghold to backend cache
-        // Small delay to ensure Stronghold is ready
-        setTimeout(() => {
-          loadApiKeysToCache().catch((error) => {
-            console.error("Failed to load API keys to cache:", error);
-          });
-        }, 100);
+    void init();
 
-        // Listen for no-models event to redirect to onboarding
-        const handleNoModels = () => {
-          console.log("No models available - redirecting to onboarding");
-          setShowOnboarding(true);
-        };
-        window.addEventListener("no-models-available", handleNoModels);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+      window.removeEventListener("no-models-available", handleNoModels);
+      updateService.dispose();
+    };
+  }, [settings]);
 
-        // Listen for navigate-to-settings event from tray menu
-        registerEvent("navigate-to-settings", () => {
+  useEffect(() => {
+    let isMounted = true;
+    const unlisteners: Array<() => void> = [];
+
+    const register = async <T,>(eventName: string, handler: (payload: T) => void | Promise<void>) => {
+      const unlisten = await registerEvent<T>(eventName, handler);
+      if (typeof unlisten !== "function") {
+        return;
+      }
+      if (!isMounted) {
+        unlisten();
+        return;
+      }
+      unlisteners.push(unlisten);
+    };
+
+    const setup = async () => {
+      try {
+        await register("navigate-to-settings", () => {
           console.log("Navigate to settings requested from tray menu");
           setActiveSection("overview");
         });
 
-        // Listen for manual update checks triggered from tray
-        registerEvent("tray-check-updates", async () => {
+        await register("tray-check-updates", async () => {
           try {
             await updateService.checkForUpdatesManually();
           } catch (e) {
@@ -91,13 +117,12 @@ export function AppContainer() {
           }
         });
 
-        // Listen for tray action errors
-        registerEvent("tray-action-error", (event) => {
-          console.error("Tray action error:", event.payload);
-          toast.error(event.payload as string);
+        await register<string>("tray-action-error", (message) => {
+          console.error("Tray action error:", message);
+          toast.error(message);
         });
 
-        registerEvent<string>("parakeet-unavailable", (message) => {
+        await register<string>("parakeet-unavailable", (message) => {
           const description = typeof message === "string" && message.trim().length > 0
             ? message
             : "Parakeet is unavailable on this Mac. Please reinstall VoiceTypr or remove the quarantine flag.";
@@ -108,8 +133,7 @@ export function AppContainer() {
           });
         });
 
-        // Listen for remote VoiceTypr errors
-        registerEvent<{ title: string; message: string }>("remote-server-error", async (data) => {
+        await register<{ title: string; message: string }>("remote-server-error", async (data) => {
           console.error("Remote server error:", data);
 
           // Show toast with error info and clear action
@@ -136,23 +160,18 @@ export function AppContainer() {
           }
         });
 
-        // Listen for license-required event and navigate to License section
-        registerEvent<{ title: string; message: string; action?: string }>(
-          "license-required", 
-          (data) => {
-            console.log("License required event received in AppContainer:", data);
-            // Navigate to License section to show license management
-            setActiveSection("license");
-            // Show a toast to inform the user
-            toast.error(data.title || "License Required", {
-              description: data.message || "Please purchase or restore a license to continue",
-              duration: 5000
-            });
-          }
-        );
+        await register<{ title: string; message: string; action?: string }>("license-required", (data) => {
+          console.log("License required event received in AppContainer:", data);
+          // Navigate to License section to show license management
+          setActiveSection("license");
+          // Show a toast to inform the user
+          toast.error(data.title || "License Required", {
+            description: data.message || "Please purchase or restore a license to continue",
+            duration: 5000
+          });
+        });
 
-        // Listen for no models error (when trying to record without any models)
-        registerEvent<ErrorEventPayload>("no-models-error", (data) => {
+        await register<ErrorEventPayload>("no-models-error", (data) => {
           console.error("No models available:", data);
           toast.error(data.title || 'No Models Available', {
             description:
@@ -161,18 +180,53 @@ export function AppContainer() {
             duration: 8000
           });
         });
-
-        return () => {
-          window.removeEventListener("no-models-available", handleNoModels);
-          updateService.dispose();
-        };
       } catch (error) {
-        console.error("Failed to initialize:", error);
+        console.error("Failed to register app event listeners:", error);
       }
     };
 
-    init();
-  }, [registerEvent, settings]);
+    void setup();
+
+    return () => {
+      isMounted = false;
+      unlisteners.forEach((unlisten) => {
+        if (typeof unlisten === "function") {
+          unlisten();
+        }
+      });
+    };
+  }, [registerEvent]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const syncOnboardingVisibility = async () => {
+      if (!settings) return;
+
+      if (settings.onboarding_completed) {
+        setShowOnboarding(false);
+        return;
+      }
+
+      try {
+        const activeRemoteServer = await invoke<string | null>("get_active_remote_server");
+        if (!cancelled) {
+          setShowOnboarding(!activeRemoteServer);
+        }
+      } catch (error) {
+        console.error("Failed to check active remote server:", error);
+        if (!cancelled) {
+          setShowOnboarding(true);
+        }
+      }
+    };
+
+    syncOnboardingVisibility();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settings]);
 
   // Mark when onboarding is being shown
   useEffect(() => {

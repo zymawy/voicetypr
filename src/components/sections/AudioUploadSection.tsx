@@ -10,7 +10,7 @@ import {
   AlertCircle
 } from "lucide-react";
 import { toast } from "sonner";
-// invoke handled inside zustand store
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSettings } from "@/contexts/SettingsContext";
 import { useModelAvailability } from "@/hooks/useModelAvailability";
@@ -24,6 +24,7 @@ import { useUploadStore } from "@/state/upload";
 export function AudioUploadSection() {
   const [copied, setCopied] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [activeRemoteServer, setActiveRemoteServer] = useState<string | null>(null);
   const { settings } = useSettings();
   const { selectedModelAvailable } = useModelAvailability();
   const {
@@ -39,6 +40,59 @@ export function AudioUploadSection() {
   const isProcessing = status === 'processing';
   const effectiveFileName = selectedFile?.name || null;
   const hasEffectiveSelection = !!selectedFile;
+  const hasRemoteModelSource = !!activeRemoteServer;
+
+  const resolveHistoryModelName = async () => {
+    if (!activeRemoteServer) {
+      return settings?.current_model || '';
+    }
+
+    try {
+      const servers = await invoke<Array<{
+        id: string;
+        name?: string;
+        host: string;
+        port: number;
+      }>>('list_remote_servers');
+      if (!Array.isArray(servers)) {
+        return `Remote: ${activeRemoteServer}`;
+      }
+
+      const activeServer = servers.find((server) => server.id === activeRemoteServer);
+
+      if (!activeServer) {
+        return `Remote: ${activeRemoteServer}`;
+      }
+
+      const displayName = activeServer.name || `${activeServer.host}:${activeServer.port}`;
+      return `Remote: ${displayName}`;
+    } catch (error) {
+      console.error('Failed to resolve active remote server name:', error);
+      return `Remote: ${activeRemoteServer}`;
+    }
+  };
+
+  useEffect(() => {
+    const loadActiveRemoteServer = async () => {
+      try {
+        const activeId = await invoke<string | null>('get_active_remote_server');
+        setActiveRemoteServer(activeId);
+      } catch (error) {
+        console.error('Failed to get active remote server:', error);
+        setActiveRemoteServer(null);
+      }
+    };
+
+    loadActiveRemoteServer();
+
+    const unlistenModelChanged = listen('model-changed', loadActiveRemoteServer);
+    const unlistenSharingChanged = listen('sharing-status-changed', loadActiveRemoteServer);
+
+    return () => {
+      unlistenModelChanged.then((fn) => fn());
+      unlistenSharingChanged.then((fn) => fn());
+    };
+  }, []);
 
   const handleFileSelect = async () => {
     try {
@@ -67,13 +121,13 @@ export function AudioUploadSection() {
       return;
     }
 
-    if (!settings?.current_model) {
+    if (!settings?.current_model && !hasRemoteModelSource) {
       toast.error("Select a speech model in Models before transcribing.");
       return;
     }
 
-    if (selectedModelAvailable === false) {
-      const engine = settings.current_model_engine || 'whisper';
+    if (!hasRemoteModelSource && selectedModelAvailable === false) {
+      const engine = settings?.current_model_engine || 'whisper';
       toast.error(
         engine === 'soniox'
           ? 'Connect your cloud provider before transcribing audio.'
@@ -87,12 +141,16 @@ export function AudioUploadSection() {
       return;
     }
 
-    await start(settings.current_model, settings.current_model_engine || 'whisper');
+    const result = await start(
+      settings?.current_model || '',
+      settings?.current_model_engine || 'whisper',
+      await resolveHistoryModelName()
+    );
 
     try {
-      if (storeError) {
-        toast.error(storeError);
-      } else if (status === 'done') {
+      if (result?.outcome === 'error') {
+        toast.error(result.message);
+      } else if (result?.outcome === 'success') {
         toast.success("Transcription completed and saved to history!");
       }
     } catch (error) {

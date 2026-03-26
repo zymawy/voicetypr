@@ -106,7 +106,8 @@ Runs after each successful recording save:
 2. Sort by creation time (oldest first)
 3. If count > retention limit:
    - Delete oldest files until count <= limit
-   - Update any history items that referenced deleted files (set `recording_file` to None)
+   - Cleanup only deletes the oldest audio files.
+> **Note:** History backfill (setting `recording_file` to null for deleted recordings) is not currently implemented. Cleanup only deletes the oldest audio files.
 
 ## Implementation Tasks
 

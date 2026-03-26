@@ -9,8 +9,8 @@
 //! - Constants and configurations
 
 use crate::commands::remote::{
-    get_firewall_status, get_local_ips, get_local_machine_id, open_firewall_settings,
-    FirewallStatus, DEFAULT_PORT,
+    DEFAULT_PORT, FirewallStatus, get_firewall_status, get_local_ips, get_local_machine_id,
+    open_firewall_settings,
 };
 use crate::remote::settings::{ConnectionStatus, RemoteSettings, SavedConnection};
 
@@ -228,6 +228,7 @@ fn test_get_firewall_status_consistency() {
 // ============================================================================
 
 #[test]
+#[ignore = "Opens real OS UI; run manually only"]
 fn test_open_firewall_settings_returns_ok() {
     // This function spawns a process, so we just verify it returns Ok
     // We can't actually test that it opens the settings UI
@@ -250,27 +251,15 @@ fn test_open_firewall_settings_returns_ok() {
 
 #[test]
 fn test_get_local_machine_id_returns_result() {
-    let result = get_local_machine_id();
-    // Should return some result (Ok or Err depending on platform)
-    match result {
-        Ok(id) => {
-            assert!(!id.is_empty(), "Machine ID should not be empty");
-        }
-        Err(_) => {
-            // Some platforms may not support getting machine ID
-        }
-    }
+    let id = get_local_machine_id().expect("should return machine id");
+    assert!(!id.is_empty(), "machine id should not be empty");
 }
 
 #[test]
 fn test_get_local_machine_id_consistent() {
-    // If it succeeds, it should return the same ID each time
-    let result1 = get_local_machine_id();
-    let result2 = get_local_machine_id();
-
-    if let (Ok(id1), Ok(id2)) = (result1, result2) {
-        assert_eq!(id1, id2, "Machine ID should be consistent across calls");
-    }
+    let id1 = get_local_machine_id().expect("first call should succeed");
+    let id2 = get_local_machine_id().expect("second call should succeed");
+    assert_eq!(id1, id2, "machine id should be consistent");
 }
 
 // ============================================================================

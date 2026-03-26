@@ -2,7 +2,11 @@
 //!
 //! Tests the tray menu changes for remote server selection and status display.
 
-use crate::menu::{format_tray_model_label, should_mark_model_selected};
+use crate::menu::{
+    format_tray_model_label, should_include_remote_connection_in_tray,
+    should_mark_model_selected,
+};
+use crate::remote::settings::ConnectionStatus;
 
 // ============================================================================
 // should_mark_model_selected Tests
@@ -243,6 +247,24 @@ mod selection_logic_tests {
     fn test_remote_server_not_selected_no_active() {
         let result = is_remote_server_selected(None, "conn_123");
         assert!(!result);
+    }
+}
+
+mod remote_connection_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn test_self_connection_is_hidden_from_tray() {
+        assert!(!should_include_remote_connection_in_tray(
+            &ConnectionStatus::SelfConnection
+        ));
+    }
+
+    #[test]
+    fn test_online_connection_is_shown_in_tray() {
+        assert!(should_include_remote_connection_in_tray(
+            &ConnectionStatus::Online
+        ));
     }
 }
 

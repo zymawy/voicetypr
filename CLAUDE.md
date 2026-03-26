@@ -132,7 +132,7 @@ App identifier: `com.ideaplexa.voicetypr`
 | Data | macOS | Windows |
 |------|-------|---------|
 | **Recordings** | `~/Library/Application Support/com.ideaplexa.voicetypr/recordings/` | `%APPDATA%\com.ideaplexa.voicetypr\recordings\` |
-| **Whisper Models** | `~/Library/Application Support/com.voicetypr.app/models/` | `%APPDATA%\com.voicetypr.app\models\` |
+| **Whisper Models** | `~/Library/Application Support/com.ideaplexa.voicetypr/models/` | `%APPDATA%\com.ideaplexa.voicetypr\models\` |
 | **Settings** | `~/Library/Application Support/com.ideaplexa.voicetypr/` | `%APPDATA%\com.ideaplexa.voicetypr\` |
 | **Test Audio** | `tests/fixtures/audio-files/test-audio.wav` | `tests/fixtures/audio-files/test-audio.wav` |
 

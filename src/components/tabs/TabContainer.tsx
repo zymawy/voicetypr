@@ -77,6 +77,12 @@ export function TabContainer({ activeSection }: TabContainerProps) {
       });
     });
     
+    // Listen for re-transcription updates so overview stats stay current
+    registerEvent("transcription-updated", async () => {
+      console.log("[TabContainer] Full history reload (re-transcription update)");
+      await loadHistory();
+    });
+
     // Listen for history-updated only for delete/clear operations
     // (These still emit history-updated from backend)
     registerEvent("history-updated", async () => {

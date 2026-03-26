@@ -6,10 +6,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::AppHandle;
-use tokio::sync::{oneshot, Mutex};
-use warp::Filter;
+use tokio::sync::{oneshot, RwLock};
 
-use super::http::{create_routes, ServerContext};
+use super::http::create_routes;
 use super::transcription::{RealTranscriptionContext, SharedServerState, TranscriptionServerConfig};
 
 /// Result of attempting to bind to an IP address
@@ -27,6 +26,8 @@ pub struct BindingResult {
 pub struct ServerHandle {
     /// Channels to signal server shutdown (one per bound IP)
     shutdown_txs: Vec<oneshot::Sender<()>>,
+    /// Handles to spawned server tasks for awaiting completion
+    task_handles: Vec<tokio::task::JoinHandle<()>>,
     /// The port the server is listening on
     pub port: u16,
     /// The IPs the server is bound to
@@ -37,17 +38,31 @@ pub struct ServerHandle {
 
 impl ServerHandle {
     /// Stop the server gracefully
-    pub fn stop(&mut self) {
+    pub async fn stop(&mut self) {
         for tx in self.shutdown_txs.drain(..) {
             let _ = tx.send(());
         }
         log::info!("[Remote Server] Shutdown signal sent for port {}", self.port);
+
+        for handle in self.task_handles.drain(..) {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => {},
+                Ok(Err(e)) => log::warn!("[Remote Server] Server task panicked: {}", e),
+                Err(_) => log::warn!("[Remote Server] Server task did not stop within 5s timeout"),
+            }
+        }
+        log::info!("[Remote Server] All server tasks stopped for port {}", self.port);
     }
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
-        self.stop();
+        for tx in self.shutdown_txs.drain(..) {
+            let _ = tx.send(());
+        }
+        for handle in self.task_handles.drain(..) {
+            handle.abort();
+        }
     }
 }
 
@@ -114,7 +129,7 @@ impl RemoteServerManager {
         // Stop existing server if running
         if self.handle.is_some() {
             log::info!("⏱️ [SERVER TIMING] Stopping existing server... (+{}ms)", start_time.elapsed().as_millis());
-            self.stop();
+            self.stop().await;
             log::info!("⏱️ [SERVER TIMING] Existing server stopped (+{}ms)", start_time.elapsed().as_millis());
         }
 
@@ -133,7 +148,7 @@ impl RemoteServerManager {
 
         // Create the transcription context with shared state and app handle
         // App handle is needed for Parakeet engine support
-        let ctx = Arc::new(Mutex::new(RealTranscriptionContext::new_with_shared_state(
+        let ctx = Arc::new(RwLock::new(RealTranscriptionContext::new_with_shared_state(
             server_name.clone(),
             password,
             shared_state,
@@ -168,6 +183,7 @@ impl RemoteServerManager {
         );
 
         let mut shutdown_txs = Vec::new();
+        let mut task_handles = Vec::new();
         let mut bound_ips = Vec::new();
         let mut binding_results = Vec::new();
 
@@ -201,9 +217,9 @@ impl RemoteServerManager {
                             }
                         }
                     };
-
                     // Spawn the server task
-                    tokio::spawn(server);
+                    let handle = tokio::spawn(server);
+                    task_handles.push(handle);
 
                     bound_ips.push(ip);
                     binding_results.push(BindingResult {
@@ -234,6 +250,7 @@ impl RemoteServerManager {
         // Store the handle
         self.handle = Some(ServerHandle {
             shutdown_txs,
+            task_handles,
             port,
             bound_ips,
             binding_results,
@@ -250,10 +267,10 @@ impl RemoteServerManager {
     }
 
     /// Stop the remote transcription server
-    pub fn stop(&mut self) {
+    pub async fn stop(&mut self) {
         if let Some(mut handle) = self.handle.take() {
             let port = handle.port;
-            handle.stop();
+            handle.stop().await;
             log::info!("[Remote Server] Server STOPPED (was on port {})", port);
         }
         self.config = None;
@@ -382,7 +399,7 @@ mod tests {
         assert_eq!(status.server_name, Some("Test Server".to_string()));
 
         // Stop server
-        manager.stop();
+        manager.stop().await;
         assert!(!manager.is_running());
         assert!(manager.get_port().is_none());
 
@@ -431,6 +448,6 @@ mod tests {
             Some("Server 2".to_string())
         );
 
-        manager.stop();
+        manager.stop().await;
     }
 }

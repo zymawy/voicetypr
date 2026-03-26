@@ -4,7 +4,7 @@
 //! other VoiceTypr instances for remote transcription.
 
 use crate::remote::client::{
-    calculate_timeout_ms, RemoteServerConnection, TranscriptionRequest, TranscriptionSource,
+    RemoteServerConnection, TranscriptionRequest, TranscriptionSource, calculate_timeout_ms,
 };
 
 /// Test timeout calculation for live recordings (30 seconds)
@@ -94,7 +94,10 @@ fn test_remote_server_connection_no_password() {
 fn test_remote_server_status_url() {
     let conn = RemoteServerConnection::new("192.168.1.100".to_string(), 47842, None);
 
-    assert_eq!(conn.status_url(), "http://192.168.1.100:47842/api/v1/status");
+    assert_eq!(
+        conn.status_url(),
+        "http://192.168.1.100:47842/api/v1/status"
+    );
 }
 
 /// Test URL generation for transcribe endpoint
@@ -224,19 +227,21 @@ fn test_timeout_calculation_upload_large_duration() {
 #[test]
 fn test_remote_server_urls_ipv6() {
     let conn = RemoteServerConnection::new("::1".to_string(), 47842, None);
-    assert_eq!(conn.status_url(), "http://::1:47842/api/v1/status");
-    assert_eq!(conn.transcribe_url(), "http://::1:47842/api/v1/transcribe");
+    assert_eq!(conn.status_url(), "http://[::1]:47842/api/v1/status");
+    assert_eq!(
+        conn.transcribe_url(),
+        "http://[::1]:47842/api/v1/transcribe"
+    );
     assert_eq!(conn.display_name(), "::1:47842");
 }
 
 /// Test URL generation with full IPv6 address
 #[test]
 fn test_remote_server_urls_ipv6_full() {
-    let conn =
-        RemoteServerConnection::new("2001:db8:85a3::8a2e:370:7334".to_string(), 8080, None);
+    let conn = RemoteServerConnection::new("2001:db8:85a3::8a2e:370:7334".to_string(), 8080, None);
     assert_eq!(
         conn.status_url(),
-        "http://2001:db8:85a3::8a2e:370:7334:8080/api/v1/status"
+        "http://[2001:db8:85a3::8a2e:370:7334]:8080/api/v1/status"
     );
 }
 
@@ -269,11 +274,8 @@ fn test_remote_server_connection_empty_host() {
 /// Test connection with empty password (Some("") vs None)
 #[test]
 fn test_remote_server_connection_empty_password() {
-    let conn_empty = RemoteServerConnection::new(
-        "localhost".to_string(),
-        47842,
-        Some(String::new()),
-    );
+    let conn_empty =
+        RemoteServerConnection::new("localhost".to_string(), 47842, Some(String::new()));
     assert_eq!(conn_empty.password, Some(String::new()));
 
     let conn_none = RemoteServerConnection::new("localhost".to_string(), 47842, None);
@@ -325,11 +327,8 @@ fn test_remote_server_connection_clone() {
 /// Test Debug implementation for RemoteServerConnection
 #[test]
 fn test_remote_server_connection_debug() {
-    let conn = RemoteServerConnection::new(
-        "localhost".to_string(),
-        47842,
-        Some("password".to_string()),
-    );
+    let conn =
+        RemoteServerConnection::new("localhost".to_string(), 47842, Some("password".to_string()));
     let debug_str = format!("{:?}", conn);
 
     assert!(debug_str.contains("RemoteServerConnection"));
@@ -340,9 +339,15 @@ fn test_remote_server_connection_debug() {
 /// Test TranscriptionSource equality
 #[test]
 fn test_transcription_source_equality() {
-    assert_eq!(TranscriptionSource::LiveRecording, TranscriptionSource::LiveRecording);
+    assert_eq!(
+        TranscriptionSource::LiveRecording,
+        TranscriptionSource::LiveRecording
+    );
     assert_eq!(TranscriptionSource::Upload, TranscriptionSource::Upload);
-    assert_ne!(TranscriptionSource::LiveRecording, TranscriptionSource::Upload);
+    assert_ne!(
+        TranscriptionSource::LiveRecording,
+        TranscriptionSource::Upload
+    );
 }
 
 /// Test TranscriptionSource clone

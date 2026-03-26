@@ -30,7 +30,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
-    use tokio::sync::Mutex;
+    use tokio::sync::RwLock;
     use tokio::time::sleep;
 
     /// URL for the tiny.en Whisper model (~75MB)
@@ -65,15 +65,15 @@ mod tests {
     /// Get the model directory path for this platform
     fn get_model_dir() -> PathBuf {
         // Primary: User data directory (where VoiceTypr downloads models)
-        // - macOS: ~/Library/Application Support/com.voicetypr.app/models/
-        // - Windows: C:\Users\<user>\AppData\Roaming\com.voicetypr.app\models\
+        // - macOS: ~/Library/Application Support/com.ideaplexa.voicetypr/models/
+        // - Windows: C:\Users\<user>\AppData\Roaming\com.ideaplexa.voicetypr\models\
         if let Some(data_dir) = dirs::data_dir() {
-            return data_dir.join("com.voicetypr.app").join("models");
+            return data_dir.join("com.ideaplexa.voicetypr").join("models");
         }
 
         // Fallback: data_local_dir
         if let Some(local_dir) = dirs::data_local_dir() {
-            return local_dir.join("com.voicetypr.app").join("models");
+            return local_dir.join("com.ideaplexa.voicetypr").join("models");
         }
 
         // Last resort: local models directory
@@ -213,7 +213,7 @@ mod tests {
         };
 
         // Create real transcription context wrapped in Arc<Mutex>
-        let context = Arc::new(Mutex::new(RealTranscriptionContext::new(config)));
+        let context = Arc::new(RwLock::new(RealTranscriptionContext::new(config)));
 
         // Start server
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -297,10 +297,12 @@ mod tests {
         println!("Transcribed text: '{}'", transcribed_text);
         // Note: Content verification is relaxed because the tiny model may produce
         // varying results. The key test is that transcription completes successfully.
+        assert!(!transcribed_text.is_empty(), "Transcription should not be empty");
         assert!(
-            !transcribed_text.is_empty(),
-            "Transcription should produce non-empty text"
-        );
+            verify_transcription(&transcribed_text),
+            "Transcription should contain expected phrases, got: '{}'",
+            transcribed_text
+);
 
         // Shutdown server
         let _ = shutdown_tx.send(());
@@ -328,7 +330,7 @@ mod tests {
             model_path,
         };
 
-        let context = Arc::new(Mutex::new(RealTranscriptionContext::new(config)));
+        let context = Arc::new(RwLock::new(RealTranscriptionContext::new(config)));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
@@ -429,7 +431,7 @@ mod tests {
             model_path,
         };
 
-        let context = Arc::new(Mutex::new(RealTranscriptionContext::new(config)));
+        let context = Arc::new(RwLock::new(RealTranscriptionContext::new(config)));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
@@ -564,7 +566,7 @@ mod tests {
             model_path,
         };
 
-        let context = Arc::new(Mutex::new(RealTranscriptionContext::new(config)));
+        let context = Arc::new(RwLock::new(RealTranscriptionContext::new(config)));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
@@ -658,10 +660,9 @@ mod tests {
             model_path,
         };
 
-        // Create shared transcription context
-        // This simulates the host having one context used for both local and remote transcriptions
-        let context = Arc::new(Mutex::new(RealTranscriptionContext::new(config)));
-        let context_for_local = context.clone();
+        // Create separate transcription contexts to avoid serializing local and remote work
+        let remote_context = Arc::new(RwLock::new(RealTranscriptionContext::new(config.clone())));
+        let local_context = RealTranscriptionContext::new(config);
 
         // Start HTTP server for remote requests
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -669,7 +670,7 @@ mod tests {
 
         let server_handle = tokio::spawn(async move {
             let addr = ([127, 0, 0, 1], 0u16);
-            let routes = create_routes(context);
+            let routes = create_routes(remote_context);
 
             let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(addr, async {
                 shutdown_rx.await.ok();
@@ -718,14 +719,10 @@ mod tests {
             json
         });
 
-        // Spawn "local host" transcription (direct context access)
         let local_handle = tokio::spawn(async move {
             println!("[Local] Starting direct transcription...");
 
-            // Access the shared context directly (simulating local transcription on host)
-            let ctx = context_for_local.lock().await;
-            let result = ctx.transcribe(&audio_data_local);
-            drop(ctx); // Release lock
+            let result = local_context.transcribe(&audio_data_local);
 
             match result {
                 Ok(response) => {
@@ -759,10 +756,12 @@ mod tests {
         let remote_text = remote_json["text"].as_str().unwrap_or("");
         println!("[Remote] Transcribed: '{}'", remote_text);
         // Note: Content verification is relaxed - key test is that transcription completes
+        assert!(!remote_text.is_empty(), "[Remote] Transcription should not be empty");
         assert!(
-            !remote_text.is_empty(),
-            "[Remote] Transcription should produce non-empty text"
-        );
+            verify_transcription(&remote_text),
+            "[Remote] Transcription should contain expected phrases, got: '{}'",
+            remote_text
+);
 
         // Verify local transcription succeeded
         let local_response = local_result.expect("[Local] Task panicked");
@@ -775,10 +774,12 @@ mod tests {
         assert!(!local_response.model.is_empty(), "[Local] Empty model name");
         println!("[Local] Transcribed: '{}'", local_response.text);
         // Note: Content verification is relaxed - key test is that transcription completes
+        assert!(!local_response.text.is_empty(), "[Local] Transcription should not be empty");
         assert!(
-            !local_response.text.is_empty(),
-            "[Local] Transcription should produce non-empty text"
-        );
+            verify_transcription(&local_response.text),
+            "[Local] Transcription should contain expected phrases, got: '{}'",
+            local_response.text
+);
 
         // Shutdown server
         let _ = shutdown_tx.send(());
@@ -816,7 +817,7 @@ mod tests {
             model_path,
         };
 
-        let context = Arc::new(Mutex::new(RealTranscriptionContext::new(config)));
+        let context = Arc::new(RwLock::new(RealTranscriptionContext::new(config)));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
 
@@ -910,10 +911,12 @@ mod tests {
             let text = json["text"].as_str().unwrap_or("");
             println!("[Client {}] Transcribed: '{}'", client_id, text);
             // Note: Content verification is relaxed - key test is that transcription completes
+            assert!(!text.is_empty(), "[Client {}] Transcription should not be empty", client_id);
             assert!(
-                !text.is_empty(),
-                "[Client {}] Transcription should produce non-empty text",
-                client_id
+                verify_transcription(text),
+                "[Client {}] Transcription should contain expected phrases, got: '{}'",
+                client_id,
+                text
             );
             verified_count += 1;
             total_duration += elapsed;

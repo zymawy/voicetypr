@@ -102,7 +102,7 @@ New collapsible card in Settings section (after "Startup"):
 - IP address is auto-detected, display-only (with copy button)
 - Port defaults to 47842, user can change
 - Password is optional - blank means no authentication required
-- All downloaded models are automatically shared when enabled
+- When sharing is enabled, the currently selected model is shared with remote clients. Only one model is served at a time.
 - Status shows currently selected model and connection count
 
 ### Client Mode: Models Section

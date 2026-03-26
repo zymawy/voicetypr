@@ -65,6 +65,11 @@ export function RecordingsTab() {
           console.log("[RecordingsTab] Full reload (delete/clear operation)");
           await loadHistory();
         });
+
+        registerEvent("transcription-updated", async () => {
+          console.log("[RecordingsTab] Full reload (re-transcription update)");
+          await loadHistory();
+        });
       } catch (error) {
         console.error("Failed to initialize recordings tab:", error);
       }

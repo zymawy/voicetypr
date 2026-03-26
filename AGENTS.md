@@ -63,11 +63,12 @@ When multiple Claude Code agents work in parallel, follow this protocol strictly
 3. **Write** the new number back to `.agent-counter`
 4. **Your Agent ID** for this session is `Agent-<number>` (e.g., `Agent-7`)
 
-Then create your worktree (use the branch specified in the issue you're working on):
+Then create your worktree from the remote branch, creating a local working branch that tracks it:
 ```bash
-git worktree add .worktrees/agent-<number> <branch-from-issue>
+git worktree add .worktrees/agent-<number> -b agent-<number>-work origin/<branch-from-issue>
 cd .worktrees/agent-<number>
 ```
+This avoids the "already checked out" error because the worktree uses its own local branch while tracking the remote branch.
 
 **IMPORTANT**: Use your Agent ID consistently in ALL issue claims during this conversation.
 

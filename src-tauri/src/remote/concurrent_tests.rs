@@ -17,7 +17,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use tokio::sync::Mutex;
+    use tokio::sync::RwLock;
     use tokio::time::sleep;
 
     /// Mock context with configurable delay for simulating transcription time
@@ -103,7 +103,7 @@ mod tests {
 
     /// Helper to start a test server and return its address
     async fn start_test_server<T: ServerContext + 'static>(
-        ctx: Arc<Mutex<T>>,
+        ctx: Arc<RwLock<T>>,
     ) -> (
         std::net::SocketAddr,
         tokio::sync::oneshot::Sender<()>,
@@ -139,7 +139,7 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_transcription_requests_serialize() {
         // Use 100ms delay to make timing measurable
-        let ctx = Arc::new(Mutex::new(DelayedMockContext::new(100)));
+        let ctx = Arc::new(RwLock::new(DelayedMockContext::new(100)));
         let (addr, shutdown_tx, handle) = start_test_server(ctx.clone()).await;
 
         let client = reqwest::Client::new();
@@ -198,7 +198,7 @@ mod tests {
         );
 
         // Verify both completed
-        let ctx_guard = ctx.lock().await;
+        let ctx_guard = ctx.read().await;
         assert_eq!(
             ctx_guard.get_completed_count(),
             2,
@@ -223,7 +223,7 @@ mod tests {
     /// Simulates multiple remote clients sending requests while host is busy
     #[tokio::test]
     async fn test_multiple_clients_queue_without_deadlock() {
-        let ctx = Arc::new(Mutex::new(DelayedMockContext::new(50)));
+        let ctx = Arc::new(RwLock::new(DelayedMockContext::new(50)));
         let (addr, shutdown_tx, handle) = start_test_server(ctx.clone()).await;
 
         let client = reqwest::Client::new();
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(successes, 5, "All 5 requests should succeed");
 
         // Verify completion count
-        let ctx_guard = ctx.lock().await;
+        let ctx_guard = ctx.read().await;
         assert_eq!(ctx_guard.get_completed_count(), 5);
         assert_eq!(ctx_guard.get_max_concurrent(), 1);
 
@@ -282,7 +282,7 @@ mod tests {
     /// Verifies that Tokio's mutex provides fair ordering
     #[tokio::test]
     async fn test_request_completion_order_is_fifo() {
-        let ctx = Arc::new(Mutex::new(DelayedMockContext::new(30)));
+        let ctx = Arc::new(RwLock::new(DelayedMockContext::new(30)));
         let (addr, shutdown_tx, handle) = start_test_server(ctx.clone()).await;
 
         let client = reqwest::Client::new();
@@ -341,7 +341,7 @@ mod tests {
     #[tokio::test]
     async fn test_status_endpoint_responsive_during_transcription() {
         // Use longer delay to ensure transcription is still running when we check status
-        let ctx = Arc::new(Mutex::new(DelayedMockContext::new(200)));
+        let ctx = Arc::new(RwLock::new(DelayedMockContext::new(200)));
         let (addr, shutdown_tx, handle) = start_test_server(ctx.clone()).await;
 
         let client = reqwest::Client::new();
@@ -412,7 +412,7 @@ mod tests {
     /// Simulates one client sending bad data while another sends valid data
     #[tokio::test]
     async fn test_error_isolation_between_requests() {
-        let ctx = Arc::new(Mutex::new(DelayedMockContext::new(50)));
+        let ctx = Arc::new(RwLock::new(DelayedMockContext::new(50)));
         let (addr, shutdown_tx, handle) = start_test_server(ctx.clone()).await;
 
         let client = reqwest::Client::new();
@@ -471,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn test_host_local_plus_remote_client_concurrent() {
         // Simulate real transcription time (~500ms for short audio)
-        let ctx = Arc::new(Mutex::new(DelayedMockContext::new(100)));
+        let ctx = Arc::new(RwLock::new(DelayedMockContext::new(100)));
         let (addr, shutdown_tx, handle) = start_test_server(ctx.clone()).await;
 
         let client = reqwest::Client::new();
@@ -541,7 +541,7 @@ mod tests {
         println!("Remote transcription completed in {:?}", remote_elapsed);
 
         // Verify serialization occurred
-        let ctx_guard = ctx.lock().await;
+        let ctx_guard = ctx.read().await;
         assert_eq!(ctx_guard.get_completed_count(), 2);
         assert_eq!(ctx_guard.get_max_concurrent(), 1);
 

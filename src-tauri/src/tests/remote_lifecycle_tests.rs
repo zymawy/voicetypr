@@ -112,7 +112,7 @@ async fn test_server_starts_successfully() {
         .await;
 
     assert!(result.is_ok());
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -133,7 +133,7 @@ async fn test_server_is_running_after_start() {
         .unwrap();
 
     assert!(manager.is_running());
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -154,7 +154,7 @@ async fn test_server_reports_correct_port_after_start() {
         .unwrap();
 
     assert_eq!(manager.get_port(), Some(47852));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -183,7 +183,7 @@ async fn test_server_stores_config_after_start() {
     assert_eq!(config.model_name, "large-v3");
     assert_eq!(config.model_path, PathBuf::from("/models/large.bin"));
 
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -205,7 +205,7 @@ async fn test_server_status_enabled_after_start() {
 
     let status = manager.get_status();
     assert!(status.enabled);
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -227,7 +227,7 @@ async fn test_server_status_has_correct_port() {
 
     let status = manager.get_status();
     assert_eq!(status.port, Some(47855));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -249,7 +249,7 @@ async fn test_server_status_has_correct_model_name() {
 
     let status = manager.get_status();
     assert_eq!(status.model_name, Some("my-whisper-model".to_string()));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -271,7 +271,7 @@ async fn test_server_status_has_correct_server_name() {
 
     let status = manager.get_status();
     assert_eq!(status.server_name, Some("My Desktop PC".to_string()));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -293,7 +293,7 @@ async fn test_server_status_has_password_when_set() {
 
     let status = manager.get_status();
     assert_eq!(status.password, Some("mypassword123".to_string()));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -315,7 +315,7 @@ async fn test_server_status_no_password_when_not_set() {
 
     let status = manager.get_status();
     assert!(status.password.is_none());
-    manager.stop();
+    manager.stop().await;
 }
 
 // ============================================================================
@@ -339,7 +339,7 @@ async fn test_server_stop_sets_not_running() {
         .await
         .unwrap();
 
-    manager.stop();
+    manager.stop().await;
     assert!(!manager.is_running());
 }
 
@@ -360,7 +360,7 @@ async fn test_server_stop_clears_port() {
         .await
         .unwrap();
 
-    manager.stop();
+    manager.stop().await;
     assert!(manager.get_port().is_none());
 }
 
@@ -381,7 +381,7 @@ async fn test_server_stop_clears_config() {
         .await
         .unwrap();
 
-    manager.stop();
+    manager.stop().await;
     assert!(manager.get_config().is_none());
 }
 
@@ -402,7 +402,7 @@ async fn test_server_status_disabled_after_stop() {
         .await
         .unwrap();
 
-    manager.stop();
+    manager.stop().await;
     let status = manager.get_status();
     assert!(!status.enabled);
 }
@@ -412,9 +412,9 @@ async fn test_stop_on_not_running_server_is_safe() {
     let mut manager = RemoteServerManager::new();
 
     // Should not panic or error
-    manager.stop();
-    manager.stop();
-    manager.stop();
+    manager.stop().await;
+    manager.stop().await;
+    manager.stop().await;
 
     assert!(!manager.is_running());
 }
@@ -440,7 +440,7 @@ async fn test_port_can_be_reused_after_stop() {
         )
         .await
         .unwrap();
-    manager.stop();
+    manager.stop().await;
 
     // Give tokio a moment to fully release the port
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -459,7 +459,7 @@ async fn test_port_can_be_reused_after_stop() {
         .await;
 
     assert!(result.is_ok());
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -529,7 +529,7 @@ async fn test_update_model_changes_model_name() {
 
     let config = manager.get_config().unwrap();
     assert_eq!(config.model_name, "new-model");
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -557,7 +557,7 @@ async fn test_update_model_changes_model_path() {
 
     let config = manager.get_config().unwrap();
     assert_eq!(config.model_path, PathBuf::from("/models/updated.bin"));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -588,7 +588,7 @@ async fn test_update_model_status_reflects_change() {
     // Note: get_status reads from config, not shared_state
     // The status should reflect the updated config
     assert_eq!(manager.get_status().model_name, Some("updated-model".to_string()));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -632,7 +632,7 @@ async fn test_update_model_with_different_engine() {
 
     let config = manager.get_config().unwrap();
     assert_eq!(config.model_name, "parakeet-model");
-    manager.stop();
+    manager.stop().await;
 }
 
 // ============================================================================
@@ -661,7 +661,7 @@ async fn test_three_consecutive_start_stop_cycles() {
         assert!(manager.is_running());
         assert_eq!(manager.get_port(), Some(port));
 
-        manager.stop();
+        manager.stop().await;
 
         assert!(!manager.is_running());
         assert!(manager.get_port().is_none());
@@ -710,7 +710,7 @@ async fn test_start_while_running_stops_previous() {
     assert_eq!(manager.get_status().model_name, Some("model2".to_string()));
     assert_eq!(manager.get_status().password, Some("newpass".to_string()));
 
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -731,7 +731,7 @@ async fn test_rapid_start_stop_cycles() {
             )
             .await
             .unwrap();
-        manager.stop();
+        manager.stop().await;
     }
 
     // Manager should be in clean state
@@ -771,7 +771,7 @@ async fn test_state_transition_new_to_running() {
     let status2 = manager.get_status();
     assert!(status2.enabled);
 
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -796,7 +796,7 @@ async fn test_state_transition_running_to_stopped() {
     assert!(manager.get_status().enabled);
 
     // Stop
-    manager.stop();
+    manager.stop().await;
 
     // Stopped state
     assert!(!manager.is_running());
@@ -843,7 +843,7 @@ async fn test_state_transition_running_to_running_different_config() {
     assert_eq!(manager.get_status().server_name, Some("Config B".to_string()));
     assert_eq!(manager.get_status().port, Some(47884));
 
-    manager.stop();
+    manager.stop().await;
 }
 
 // ============================================================================
@@ -977,7 +977,7 @@ async fn test_start_on_occupied_port_behavior() {
 
     // Clean up regardless of result
     drop(listener);
-    manager.stop();
+    manager.stop().await;
 
     // The test passes either way - we're just ensuring no panic occurs
     // and the manager handles the situation gracefully
@@ -1001,7 +1001,7 @@ async fn test_empty_server_name_works() {
 
     assert!(result.is_ok());
     assert_eq!(manager.get_status().server_name, Some("".to_string()));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -1022,7 +1022,7 @@ async fn test_empty_model_name_works() {
 
     assert!(result.is_ok());
     assert_eq!(manager.get_status().model_name, Some("".to_string()));
-    manager.stop();
+    manager.stop().await;
 }
 
 #[tokio::test]
@@ -1044,5 +1044,5 @@ async fn test_empty_password_string_is_some() {
 
     // Empty string should be stored as Some("")
     assert_eq!(manager.get_status().password, Some("".to_string()));
-    manager.stop();
+    manager.stop().await;
 }

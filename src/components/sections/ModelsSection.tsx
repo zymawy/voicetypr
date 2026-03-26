@@ -269,11 +269,13 @@ export function ModelsSection({
   const handleRemoveRemoteServer = useCallback(
     async (serverId: string) => {
       try {
-        await invoke("remove_remote_server", { serverId });
-        setRemoteServers((prev) => prev.filter((s) => s.id !== serverId));
         if (activeRemoteServer === serverId) {
+          await invoke("set_active_remote_server", { serverId: null });
           setActiveRemoteServer(null);
         }
+
+        await invoke("remove_remote_server", { serverId });
+        setRemoteServers((prev) => prev.filter((s) => s.id !== serverId));
         toast.success("Remote VoiceTypr removed");
       } catch (error) {
         console.error("Failed to remove remote server:", error);
@@ -354,6 +356,16 @@ export function ModelsSection({
     setCloudModal(null);
   }, [cloudModalLoading]);
 
+  const clearActiveRemote = async () => {
+    try {
+      await invoke("set_active_remote_server", { serverId: null });
+      setActiveRemoteServer(null);
+    } catch (error) {
+      console.error("Failed to clear active remote:", error);
+    }
+  };
+
+
   const handleCloudKeySubmit = useCallback(
     async (apiKey: string) => {
       if (!cloudModal) return;
@@ -374,6 +386,7 @@ export function ModelsSection({
         );
         setCloudModal(null);
         if (cloudModal.mode === "connect") {
+          await clearActiveRemote();
           await Promise.resolve(onSelect(provider.modelName));
         }
       } catch (error) {
@@ -383,7 +396,7 @@ export function ModelsSection({
         setCloudModalLoading(false);
       }
     },
-    [cloudModal, onSelect, refreshModels],
+    [cloudModal, onSelect, refreshModels, clearActiveRemote],
   );
 
   const handleCloudDisconnect = useCallback(
@@ -442,11 +455,12 @@ export function ModelsSection({
             requiresSetup ? "opacity-90" : "cursor-pointer hover:border-border",
             isActive && "bg-primary/5",
           )}
-          onClick={() => {
+          onClick={async () => {
             if (requiresSetup) {
               openCloudModal(name, "connect");
               return;
             }
+            await clearActiveRemote();
             void onSelect(name);
           }}
         >
@@ -485,7 +499,7 @@ export function ModelsSection({
         </Card>
       );
     },
-    [currentModel, handleCloudDisconnect, onSelect, openCloudModal],
+    [currentModel, handleCloudDisconnect, onSelect, openCloudModal, clearActiveRemote],
   );
 
   return (
@@ -586,17 +600,7 @@ export function ModelsSection({
                         onSelect={async (modelName) => {
                           const startTime = performance.now();
                           console.log(`⏱️ [UI TIMING] Local model onSelect START - model=${modelName}`);
-                          // Clear active remote server when selecting a local model
-                          if (activeRemoteServer) {
-                            try {
-                              console.log(`⏱️ [UI TIMING] Clearing remote server... (+${(performance.now() - startTime).toFixed(0)}ms)`);
-                              await invoke("set_active_remote_server", { serverId: null });
-                              console.log(`⏱️ [UI TIMING] Remote server cleared (+${(performance.now() - startTime).toFixed(0)}ms)`);
-                              setActiveRemoteServer(null);
-                            } catch (error) {
-                              console.error("Failed to clear active remote server:", error);
-                            }
-                          }
+                          await clearActiveRemote();
                           console.log(`⏱️ [UI TIMING] Calling onSelect... (+${(performance.now() - startTime).toFixed(0)}ms)`);
                           void onSelect(modelName);
                           console.log(`⏱️ [UI TIMING] Local model onSelect COMPLETE - total: ${(performance.now() - startTime).toFixed(0)}ms`);
@@ -632,17 +636,7 @@ export function ModelsSection({
                         onSelect={async (modelName) => {
                           const startTime = performance.now();
                           console.log(`⏱️ [UI TIMING] Local model onSelect START - model=${modelName}`);
-                          // Clear active remote server when selecting a local model
-                          if (activeRemoteServer) {
-                            try {
-                              console.log(`⏱️ [UI TIMING] Clearing remote server... (+${(performance.now() - startTime).toFixed(0)}ms)`);
-                              await invoke("set_active_remote_server", { serverId: null });
-                              console.log(`⏱️ [UI TIMING] Remote server cleared (+${(performance.now() - startTime).toFixed(0)}ms)`);
-                              setActiveRemoteServer(null);
-                            } catch (error) {
-                              console.error("Failed to clear active remote server:", error);
-                            }
-                          }
+                          await clearActiveRemote();
                           console.log(`⏱️ [UI TIMING] Calling onSelect... (+${(performance.now() - startTime).toFixed(0)}ms)`);
                           void onSelect(modelName);
                           console.log(`⏱️ [UI TIMING] Local model onSelect COMPLETE - total: ${(performance.now() - startTime).toFixed(0)}ms`);

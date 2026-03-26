@@ -3,10 +3,28 @@ use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem, PredefinedMenuItem, Subm
 use tauri::Manager;
 use tauri_plugin_store::StoreExt;
 
+use crate::remote::settings::ConnectionStatus;
 use crate::audio;
 use crate::remote::server::StatusResponse;
 use crate::remote::settings::RemoteSettings;
 use crate::whisper;
+
+pub fn should_include_remote_connection_in_tray(status: &ConnectionStatus) -> bool {
+    !matches!(status, ConnectionStatus::SelfConnection)
+}
+
+fn effective_active_remote_id(
+    active_connection_id: Option<&str>,
+    connections: &[(String, String, Option<String>)],
+) -> Option<String> {
+    active_connection_id.and_then(|id| {
+        connections
+            .iter()
+            .any(|(cid, _, _)| cid == id)
+            .then(|| id.to_string())
+    })
+}
+
 
 /// Determines if a model should appear as selected in the tray given onboarding status
 pub fn should_mark_model_selected(
@@ -63,30 +81,34 @@ pub async fn build_tray_menu<R: tauri::Runtime>(
     // Get remote server info (active connection and saved connections)
     // Use CACHED data - do NOT make HTTP calls here (that would block tray menu for seconds)
     // The frontend/background tasks handle status polling separately
-    let (active_remote_id, active_remote_display, active_remote_model, remote_connections) = {
+    let (effective_active_id, active_remote_display, active_remote_model, remote_connections) = {
         if let Some(remote_state) = app.try_state::<AsyncMutex<RemoteSettings>>() {
             log::info!("⏱️ [TRAY BUILD TIMING] Acquiring remote_settings lock... (+{}ms)", build_start.elapsed().as_millis());
             let settings = remote_state.lock().await;
             log::info!("⏱️ [TRAY BUILD TIMING] remote_settings lock acquired (+{}ms)", build_start.elapsed().as_millis());
-            let active_id = settings.active_connection_id.clone();
-
             // Build connections list using cached data (no HTTP calls!)
             // Include all servers with cached model info - let the user see what's available
             let mut connections: Vec<(String, String, Option<String>)> = Vec::new();
             for conn in settings.saved_connections.iter() {
-                // Use cached model from saved connection data
-                connections.push((conn.id.clone(), conn.display_name(), conn.model.clone()));
+                if should_include_remote_connection_in_tray(&conn.status) {
+                    connections.push((conn.id.clone(), conn.display_name(), conn.model.clone()));
+                }
             }
             log::info!("⏱️ [TRAY BUILD TIMING] Loaded {} cached connections (+{}ms)", connections.len(), build_start.elapsed().as_millis());
 
-            // Get active connection info
-            let active_conn_info = active_id.as_ref().and_then(|id| {
+            let effective_active_id = effective_active_remote_id(
+                settings.active_connection_id.as_deref(),
+                &connections,
+            );
+
+            // Get effective active connection info
+            let active_conn_info = effective_active_id.as_ref().and_then(|id| {
                 connections.iter().find(|(cid, _, _)| cid == id)
             });
             let active_display = active_conn_info.map(|(_, name, _)| name.clone());
             let active_model = active_conn_info.and_then(|(_, _, model)| model.clone());
 
-            (active_id, active_display, active_model, connections)
+            (effective_active_id, active_display, active_model, connections)
         } else {
             (None, None, None, Vec::new())
         }
@@ -129,11 +151,11 @@ pub async fn build_tray_menu<R: tauri::Runtime>(
             models.push(("soniox".to_string(), "Soniox (Cloud)".to_string(), u8::MAX, 0));
         }
 
-        // Sort by accuracy_score (ascending), then by speed_score (descending) as tiebreaker
-        // Lower accuracy_score = better accuracy = shown first
+        // Sort by accuracy_score (descending), then by speed_score (descending) as tiebreaker
+        // Higher accuracy_score = better accuracy = shown first
         // Higher speed_score = faster = shown first within same accuracy
         models.sort_by(|a, b| {
-            match a.2.cmp(&b.2) {
+            match b.2.cmp(&a.2) {
                 std::cmp::Ordering::Equal => b.3.cmp(&a.3), // speed descending
                 other => other,
             }
@@ -156,7 +178,7 @@ pub async fn build_tray_menu<R: tauri::Runtime>(
         // Add local models first
         for (model_name, display_name) in &available_models {
             // Local model - only selected if no remote is active
-            let is_selected = active_remote_id.is_none()
+            let is_selected = effective_active_id.is_none()
                 && should_mark_model_selected(onboarding_done, model_name, &current_model);
 
             let model_item = CheckMenuItem::with_id(
@@ -198,7 +220,7 @@ pub async fn build_tray_menu<R: tauri::Runtime>(
                 } else {
                     conn_display.clone()
                 };
-                let is_selected = active_remote_id.as_deref() == Some(conn_id.as_str());
+                let is_selected = effective_active_id.as_deref() == Some(conn_id.as_str());
 
                 let remote_item = CheckMenuItem::with_id(
                     app,
@@ -253,7 +275,7 @@ pub async fn build_tray_menu<R: tauri::Runtime>(
         };
 
         let current_model_display =
-            format_tray_model_label(onboarding_done || active_remote_id.is_some(), &effective_model, resolved_display_name);
+            format_tray_model_label(onboarding_done || effective_active_id.is_some(), &effective_model, resolved_display_name);
 
         Some(Submenu::with_id_and_items(
             app,
@@ -443,6 +465,27 @@ pub async fn build_tray_menu<R: tauri::Runtime>(
     log::info!("⏱️ [TRAY BUILD TIMING] build_tray_menu COMPLETE - total: {}ms", build_start.elapsed().as_millis());
     Ok(menu)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_active_remote_id_returns_none_when_active_remote_is_filtered_out() {
+        let visible_connections = vec![("remote-1".to_string(), "Remote 1".to_string(), None)];
+
+        assert_eq!(
+            effective_active_remote_id(Some("stale-remote"), &visible_connections),
+            None
+        );
+
+        assert_eq!(
+            effective_active_remote_id(Some("remote-1"), &visible_connections),
+            Some("remote-1".to_string())
+        );
+    }
+}
+
 
 /// Fetch server status with a short timeout (for getting model info)
 async fn fetch_server_status(host: &str, port: u16, password: Option<&str>) -> Result<StatusResponse, String> {

@@ -15,6 +15,8 @@ mod tests {
         assert_eq!(settings.launch_at_startup, false);
         assert_eq!(settings.onboarding_completed, false);
         assert_eq!(settings.check_updates_automatically, true); // Default to true
+        assert!(!settings.save_recordings);
+        assert_eq!(settings.recording_retention_count, Some(50));
     }
 
     #[test]

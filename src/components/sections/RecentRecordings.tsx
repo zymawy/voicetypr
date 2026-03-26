@@ -85,37 +85,47 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
   const canRecord = useCanRecord();
   const canAutoInsert = useCanAutoInsert();
 
+  const refreshOnlineRemoteServers = useCallback(async () => {
+    try {
+      const servers = await invoke<SavedConnection[]>("list_remote_servers");
+      const checks = servers.map(async (server) => {
+        try {
+          const status = await invoke<StatusResponse>("test_remote_server", { serverId: server.id });
+          const displayName = server.name || `${server.host}:${server.port}`;
+          return { id: server.id, name: displayName, model: status.model, online: true };
+        } catch {
+          return { id: server.id, name: server.name || `${server.host}:${server.port}`, model: '', online: false };
+        }
+      });
+
+      const results = await Promise.all(checks);
+      const onlineMap = new Map<string, { name: string; model: string }>();
+      const onlineSources: TranscriptionSource[] = [];
+
+      for (const result of results) {
+        if (!result.online) continue;
+
+        onlineMap.set(result.id, { name: result.name, model: result.model });
+        onlineSources.push({
+          id: `remote:${result.id}`,
+          name: result.model ? `${result.name} - ${result.model}` : result.name,
+          type: 'remote',
+        });
+      }
+
+      onlineServersRef.current = onlineMap;
+      return onlineSources;
+    } catch (error) {
+      console.error("Failed to check remote servers:", error);
+      onlineServersRef.current = new Map();
+      return [] as TranscriptionSource[];
+    }
+  }, []);
+
   // Check remote server connectivity in the background (runs once on mount)
   useEffect(() => {
-    const checkRemoteServers = async () => {
-      try {
-        const servers = await invoke<SavedConnection[]>("list_remote_servers");
-        // Check each server in parallel
-        const checks = servers.map(async (server) => {
-          try {
-            const status = await invoke<StatusResponse>("test_remote_server", { serverId: server.id });
-            // Use server name or fallback to host:port
-            const displayName = server.name || `${server.host}:${server.port}`;
-            return { id: server.id, name: displayName, model: status.model, online: true };
-          } catch {
-            return { id: server.id, name: server.name || '', model: '', online: false };
-          }
-        });
-        const results = await Promise.all(checks);
-        // Update the cache with online servers
-        const onlineMap = new Map<string, { name: string; model: string }>();
-        for (const result of results) {
-          if (result.online) {
-            onlineMap.set(result.id, { name: result.name, model: result.model });
-          }
-        }
-        onlineServersRef.current = onlineMap;
-      } catch (error) {
-        console.error("Failed to check remote servers:", error);
-      }
-    };
-    checkRemoteServers();
-  }, []);
+    refreshOnlineRemoteServers();
+  }, [refreshOnlineRemoteServers]);
 
   // Verify which recordings exist on filesystem
   useEffect(() => {
@@ -169,28 +179,11 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
       console.error("Failed to fetch local models:", error);
     }
 
-    // Fetch all configured remote servers (not just cached online ones)
-    try {
-      const servers = await invoke<SavedConnection[]>("list_remote_servers");
-      for (const server of servers) {
-        // Use cached info if available (has model name), otherwise just show server name
-        const cachedInfo = onlineServersRef.current.get(server.id);
-        const displayName = cachedInfo?.model
-          ? `${server.name || `${server.host}:${server.port}`} - ${cachedInfo.model}`
-          : server.name || `${server.host}:${server.port}`;
-        sources.push({
-          id: `remote:${server.id}`,
-          name: displayName,
-          type: 'remote',
-        });
-      }
-    } catch (error) {
-      console.error("Failed to fetch remote servers:", error);
-    }
+    sources.push(...await refreshOnlineRemoteServers());
 
     setTranscriptionSources(sources);
     setLoadingSources(false);
-  }, []);
+  }, [refreshOnlineRemoteServers]);
 
   // Handle showing recording in folder
   const handleShowInFolder = useCallback(async (item: TranscriptionHistory) => {
@@ -248,11 +241,26 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
       });
     };
 
+    const pendingModelName = sourceType === 'remote'
+      ? (() => {
+          const server = transcriptionSources.find(s => s.id === sourceId);
+          return server ? `Remote: ${server.name}` : `Remote: ${modelNameOrServerId}`;
+        })()
+      : modelNameOrServerId;
+    let retryTimestamp: string | null = null;
+
     try {
       // Get recordings directory to build full path
       const recordingsDir = await invoke<string>("get_recordings_directory");
       const separator = recordingsDir.includes('\\') ? '\\' : '/';
       const fullPath = `${recordingsDir}${separator}${item.recording_file}`;
+      retryTimestamp = await invoke<string>("save_retranscription", {
+        text: "In progress...",
+        model: pendingModelName,
+        recordingFile: item.recording_file,
+        sourceRecordingId: item.id,
+        status: 'in_progress',
+      });
 
       let result: string;
       let modelName: string;
@@ -278,11 +286,11 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
         throw new Error(`Unknown source type: ${sourceType}`);
       }
 
-      // Update the existing transcription entry in place
       await invoke("update_transcription", {
-        timestamp: item.id,
+        timestamp: retryTimestamp,
         text: result,
         model: modelName,
+        status: 'completed',
       });
 
       // Clear the re-transcribing state
@@ -294,11 +302,28 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
       }
     } catch (error) {
       console.error("Re-transcription failed:", error);
+      const failureMessage = `Re-transcription failed: ${String(error)}`;
+      try {
+        if (!retryTimestamp) {
+          throw error;
+        }
+        await invoke("update_transcription", {
+          timestamp: retryTimestamp,
+          text: failureMessage,
+          model: pendingModelName,
+          status: 'failed',
+        });
+      } catch (updateError) {
+        console.error("Failed to persist retranscription error state:", updateError);
+      }
       toast.error("Re-transcription failed", {
         description: String(error)
       });
       // Clear pending on error too
       cleanup();
+      if (onHistoryUpdate) {
+        onHistoryUpdate();
+      }
     }
   };
 

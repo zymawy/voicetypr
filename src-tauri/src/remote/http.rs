@@ -4,13 +4,15 @@
 
 use log::{info, warn};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use warp::{http::StatusCode, Filter, Rejection, Reply};
 
 use super::server::{ErrorResponse, StatusResponse, TranscribeResponse};
 
 /// Auth header name
 const AUTH_HEADER: &str = "X-VoiceTypr-Key";
+
+const MAX_AUDIO_BODY_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
 
 /// Trait for server context (allows mocking in tests)
 pub trait ServerContext: Send + Sync {
@@ -22,7 +24,7 @@ pub trait ServerContext: Send + Sync {
 
 /// Create all warp routes for the remote transcription API
 pub fn create_routes<T: ServerContext + 'static>(
-    ctx: Arc<Mutex<T>>,
+    ctx: Arc<RwLock<T>>,
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let status_route = status_endpoint(ctx.clone());
     let transcribe_route = transcribe_endpoint(ctx);
@@ -32,7 +34,7 @@ pub fn create_routes<T: ServerContext + 'static>(
 
 /// GET /api/v1/status - Returns server status and model info
 fn status_endpoint<T: ServerContext + 'static>(
-    ctx: Arc<Mutex<T>>,
+    ctx: Arc<RwLock<T>>,
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     warp::path!("api" / "v1" / "status")
         .and(warp::get())
@@ -43,12 +45,13 @@ fn status_endpoint<T: ServerContext + 'static>(
 
 /// POST /api/v1/transcribe - Accepts audio and returns transcription
 fn transcribe_endpoint<T: ServerContext + 'static>(
-    ctx: Arc<Mutex<T>>,
+    ctx: Arc<RwLock<T>>,
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     warp::path!("api" / "v1" / "transcribe")
         .and(warp::post())
         .and(warp::header::optional::<String>(AUTH_HEADER))
         .and(warp::header::<String>("content-type"))
+        .and(warp::body::content_length_limit(MAX_AUDIO_BODY_BYTES))
         .and(warp::body::bytes())
         .and(with_context(ctx))
         .and_then(handle_transcribe)
@@ -56,17 +59,17 @@ fn transcribe_endpoint<T: ServerContext + 'static>(
 
 /// Helper to inject context into handlers
 fn with_context<T: ServerContext + 'static>(
-    ctx: Arc<Mutex<T>>,
-) -> impl Filter<Extract = (Arc<Mutex<T>>,), Error = std::convert::Infallible> + Clone {
+    ctx: Arc<RwLock<T>>,
+) -> impl Filter<Extract = (Arc<RwLock<T>>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || ctx.clone())
 }
 
 /// Handle GET /api/v1/status
 async fn handle_status<T: ServerContext + 'static>(
     auth_key: Option<String>,
-    ctx: Arc<Mutex<T>>,
+    ctx: Arc<RwLock<T>>,
 ) -> Result<impl Reply, Rejection> {
-    let ctx = ctx.lock().await;
+    let ctx = ctx.read().await;
     let server_name = ctx.get_server_name();
 
     info!("[Remote Server] Status request received on '{}'", server_name);
@@ -120,9 +123,9 @@ async fn handle_transcribe<T: ServerContext + 'static>(
     auth_key: Option<String>,
     content_type: String,
     body: bytes::Bytes,
-    ctx: Arc<Mutex<T>>,
+    ctx: Arc<RwLock<T>>,
 ) -> Result<impl Reply, Rejection> {
-    let ctx = ctx.lock().await;
+    let ctx = ctx.read().await;
     let server_name = ctx.get_server_name();
     let model_name = ctx.get_model_name();
     let audio_size_kb = body.len() as f64 / 1024.0;
@@ -184,7 +187,13 @@ async fn handle_transcribe<T: ServerContext + 'static>(
             );
             // Log the actual transcription text (truncated for long texts)
             let preview = if response.text.len() > 100 {
-                format!("{}...", &response.text[..100])
+                let cut = response
+                    .text
+                    .char_indices()
+                    .nth(100)
+                    .map(|(i, _)| i)
+                    .unwrap_or(response.text.len());
+                format!("{}...", &response.text[..cut])
             } else {
                 response.text.clone()
             };
@@ -325,6 +334,141 @@ mod tests {
     }
 
     // ============================================================================
+    // Regression Tests for P1/P2 fixes
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_transcribe_endpoint_rejects_oversized_body() {
+        let ctx = Arc::new(RwLock::new(MockContext));
+        let routes = create_routes(ctx);
+
+        let oversized_audio = vec![0u8; MAX_AUDIO_BODY_BYTES as usize + 1];
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/api/v1/transcribe")
+            .header("Content-Type", "audio/wav")
+            .body(oversized_audio)
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), 413);
+    }
+
+    struct Utf8PreviewContext;
+
+    impl ServerContext for Utf8PreviewContext {
+        fn get_model_name(&self) -> String {
+            "utf8-preview-model".to_string()
+        }
+
+        fn get_server_name(&self) -> String {
+            "utf8-preview-server".to_string()
+        }
+
+        fn get_password(&self) -> Option<String> {
+            None
+        }
+
+        fn transcribe(&self, _audio_data: &[u8]) -> Result<TranscribeResponse, String> {
+            Ok(TranscribeResponse {
+                text: format!("{}é", "a".repeat(99)),
+                duration_ms: 1,
+                model: "utf8-preview-model".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transcribe_endpoint_handles_multibyte_preview_safely() {
+        let ctx = Arc::new(RwLock::new(Utf8PreviewContext));
+        let routes = create_routes(ctx);
+
+        let response = warp::test::request()
+            .method("POST")
+            .path("/api/v1/transcribe")
+            .header("Content-Type", "audio/wav")
+            .body(b"audio".to_vec())
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), 200);
+
+        let body: TranscribeResponse = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body.text, format!("{}é", "a".repeat(99)));
+    }
+
+    #[tokio::test]
+    async fn test_status_requests_are_not_blocked_by_transcription() {
+        let context = Arc::new(RwLock::new(DelayedMockContext::new(200)));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+
+        let server_context = context.clone();
+        let server_handle = tokio::spawn(async move {
+            let addr = ([127, 0, 0, 1], 0u16);
+            let routes = create_routes(server_context);
+
+            let (addr, server) = warp::serve(routes)
+                .bind_with_graceful_shutdown(addr, async {
+                    shutdown_rx.await.ok();
+                });
+
+            let _ = addr_tx.send(addr);
+            server.await;
+        });
+
+        let addr = addr_rx.await.expect("Server failed to start");
+        sleep(Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let transcribe_url = format!("http://{}/api/v1/transcribe", addr);
+        let status_url = format!("http://{}/api/v1/status", addr);
+
+        let transcribe_handle = tokio::spawn({
+            let client = client.clone();
+            let url = transcribe_url.clone();
+            async move {
+                client
+                    .post(&url)
+                    .header("Content-Type", "audio/wav")
+                    .body(b"audio".to_vec())
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await
+            }
+        });
+
+        sleep(Duration::from_millis(50)).await;
+
+        let status_start = std::time::Instant::now();
+        let status_response = client
+            .get(&status_url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("Status request failed");
+        let status_elapsed = status_start.elapsed();
+
+        assert!(status_response.status().is_success());
+        assert!(
+            status_elapsed < Duration::from_millis(100),
+            "Status request should not wait for transcription; took {:?}",
+            status_elapsed
+        );
+
+        let transcribe_response = transcribe_handle
+            .await
+            .expect("Transcribe task panicked")
+            .expect("Transcribe request failed");
+        assert!(transcribe_response.status().is_success());
+
+        let _ = shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+    }
+
+    // ============================================================================
     // Rapid Sequential Requests Tests (Issue #2)
     // ============================================================================
 
@@ -333,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn test_rapid_sequential_requests_all_complete() {
         // Create context with small delay to simulate work
-        let context = Arc::new(Mutex::new(DelayedMockContext::new(10)));
+        let context = Arc::new(RwLock::new(DelayedMockContext::new(10)));
 
         // Start server
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -402,7 +546,7 @@ mod tests {
         );
 
         // Verify request counter
-        let ctx = context.lock().await;
+        let ctx = context.read().await;
         assert_eq!(
             ctx.request_counter.load(Ordering::SeqCst),
             num_requests as u32,
@@ -419,7 +563,7 @@ mod tests {
     /// Verifies no data corruption or mixing between requests
     #[tokio::test]
     async fn test_rapid_requests_return_correct_responses() {
-        let context = Arc::new(Mutex::new(DelayedMockContext::new(5)));
+        let context = Arc::new(RwLock::new(DelayedMockContext::new(5)));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
@@ -508,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_in_one_request_doesnt_affect_others() {
         // Fail on request 2 and 4
-        let context = Arc::new(Mutex::new(FailingMockContext::new(vec![2, 4])));
+        let context = Arc::new(RwLock::new(FailingMockContext::new(vec![2, 4])));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
@@ -563,7 +707,7 @@ mod tests {
     /// Verifies server stability and no data corruption under stress
     #[tokio::test]
     async fn test_high_load_no_data_corruption() {
-        let context = Arc::new(Mutex::new(DelayedMockContext::new(2)));
+        let context = Arc::new(RwLock::new(DelayedMockContext::new(2)));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
@@ -652,7 +796,7 @@ mod tests {
         );
 
         // Verify request counter matches
-        let ctx = context.lock().await;
+        let ctx = context.read().await;
         assert_eq!(
             ctx.request_counter.load(Ordering::SeqCst),
             num_requests as u32,
@@ -668,7 +812,7 @@ mod tests {
     #[tokio::test]
     async fn test_requests_queued_not_rejected() {
         // Use longer delay to ensure requests overlap
-        let context = Arc::new(Mutex::new(DelayedMockContext::new(50)));
+        let context = Arc::new(RwLock::new(DelayedMockContext::new(50)));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
@@ -748,7 +892,7 @@ mod tests {
         );
 
         // Verify all requests were processed
-        let ctx = context.lock().await;
+        let ctx = context.read().await;
         assert_eq!(
             ctx.request_counter.load(Ordering::SeqCst),
             num_requests as u32,

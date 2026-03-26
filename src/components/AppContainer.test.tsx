@@ -1,6 +1,13 @@
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { waitFor } from '@testing-library/react';
 import { AppContainer } from './AppContainer';
+
+const mockInvoke = vi.fn();
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => mockInvoke(...args),
+}));
 
 // Mock contexts with simple defaults
 const mockSettings = {
@@ -107,6 +114,7 @@ describe('AppContainer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSettings.onboarding_completed = true;
+    mockInvoke.mockResolvedValue(null);
   });
 
   it('shows main app when onboarding is completed', () => {
@@ -115,11 +123,29 @@ describe('AppContainer', () => {
     expect(screen.getByTestId('tab-container')).toBeInTheDocument();
   });
 
-  it('shows onboarding when not completed', () => {
+  it('shows onboarding when not completed and no remote server is active', async () => {
     mockSettings.onboarding_completed = false;
+    mockInvoke.mockResolvedValue(null);
     render(<AppContainer />);
-    expect(screen.getByTestId('onboarding')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('onboarding')).toBeInTheDocument();
+    });
+
     expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
+  });
+
+  it('skips onboarding when a remote server is already active', async () => {
+    mockSettings.onboarding_completed = false;
+    mockInvoke.mockResolvedValue('remote-1');
+
+    render(<AppContainer />);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('onboarding')).not.toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId('sidebar')).toBeInTheDocument();
   });
 
   it('allows navigation between sections', () => {

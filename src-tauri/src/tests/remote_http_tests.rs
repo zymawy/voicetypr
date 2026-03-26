@@ -14,7 +14,7 @@
 use crate::remote::http::{create_routes, ServerContext};
 use crate::remote::server::{ErrorResponse, StatusResponse, TranscribeResponse};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 /// Test context for mock transcription
 struct TestContext {
@@ -47,8 +47,8 @@ impl ServerContext for TestContext {
     }
 }
 
-fn create_test_context() -> Arc<Mutex<TestContext>> {
-    Arc::new(Mutex::new(TestContext {
+fn create_test_context() -> Arc<RwLock<TestContext>> {
+    Arc::new(RwLock::new(TestContext {
         model_name: "test-model".to_string(),
         server_name: "test-server".to_string(),
         password: None,
@@ -56,8 +56,8 @@ fn create_test_context() -> Arc<Mutex<TestContext>> {
     }))
 }
 
-fn create_test_context_with_password(password: &str) -> Arc<Mutex<TestContext>> {
-    Arc::new(Mutex::new(TestContext {
+fn create_test_context_with_password(password: &str) -> Arc<RwLock<TestContext>> {
+    Arc::new(RwLock::new(TestContext {
         model_name: "test-model".to_string(),
         server_name: "test-server".to_string(),
         password: Some(password.to_string()),
@@ -280,8 +280,8 @@ impl ServerContext for FailingContext {
     }
 }
 
-fn create_failing_context(error_message: &str) -> Arc<Mutex<FailingContext>> {
-    Arc::new(Mutex::new(FailingContext {
+fn create_failing_context(error_message: &str) -> Arc<RwLock<FailingContext>> {
+    Arc::new(RwLock::new(FailingContext {
         model_name: "test-model".to_string(),
         server_name: "test-server".to_string(),
         password: None,
@@ -290,8 +290,8 @@ fn create_failing_context(error_message: &str) -> Arc<Mutex<FailingContext>> {
 }
 
 /// Test context with custom model and server names
-fn create_custom_context(model: &str, server: &str) -> Arc<Mutex<TestContext>> {
-    Arc::new(Mutex::new(TestContext {
+fn create_custom_context(model: &str, server: &str) -> Arc<RwLock<TestContext>> {
+    Arc::new(RwLock::new(TestContext {
         model_name: model.to_string(),
         server_name: server.to_string(),
         password: None,
@@ -515,7 +515,7 @@ async fn test_transcribe_response_includes_duration() {
 /// Test authentication with empty password string (should still require auth)
 #[tokio::test]
 async fn test_auth_with_empty_password_string() {
-    let ctx = Arc::new(Mutex::new(TestContext {
+    let ctx = Arc::new(RwLock::new(TestContext {
         model_name: "test-model".to_string(),
         server_name: "test-server".to_string(),
         password: Some("".to_string()), // Empty string password

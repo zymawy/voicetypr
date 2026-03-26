@@ -130,9 +130,38 @@ pub async fn should_hide_pill(app: &AppHandle) -> bool {
     result
 }
 
+struct NormalizedTempFile {
+    path: PathBuf,
+}
+
+impl NormalizedTempFile {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for NormalizedTempFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "Failed to remove normalized temp file {:?}: {}",
+                    self.path,
+                    error
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::should_hide_pill_when_idle;
+    use super::{should_hide_pill_when_idle, NormalizedTempFile};
+    use std::fs;
 
     #[test]
     fn should_hide_pill_when_idle_for_never() {
@@ -147,6 +176,22 @@ mod tests {
     #[test]
     fn should_hide_pill_when_idle_for_always() {
         assert!(!should_hide_pill_when_idle("always"));
+    }
+
+    #[test]
+    fn normalized_temp_file_removes_file_on_drop() {
+        let path = std::env::temp_dir().join(format!(
+            "voicetypr-normalized-{}.wav",
+            std::process::id()
+        ));
+        fs::write(&path, b"temp audio").unwrap();
+
+        {
+            let temp_file = NormalizedTempFile::new(path.clone());
+            assert!(temp_file.path().exists());
+        }
+
+        assert!(!path.exists());
     }
 }
 
@@ -613,6 +658,22 @@ async fn resolve_engine_for_model(
     model_name: &str,
     engine_hint: Option<&str>,
 ) -> Result<ActiveEngineSelection, String> {
+    let remote_settings = app.state::<AsyncMutex<RemoteSettings>>();
+    let active_remote = {
+        let settings = remote_settings.lock().await;
+        settings.get_active_connection().cloned()
+    };
+
+    if let Some(remote_conn) = active_remote {
+        return Ok(ActiveEngineSelection::Remote {
+            server_id: remote_conn.id.clone(),
+            server_name: remote_conn.display_name(),
+            host: remote_conn.host,
+            port: remote_conn.port,
+            password: remote_conn.password,
+        });
+    }
+
     let whisper_state = app.state::<AsyncRwLock<WhisperManager>>();
     let parakeet_manager = app.state::<ParakeetManager>();
 
@@ -2812,15 +2873,15 @@ pub async fn transcribe_audio_file(
         ActiveEngineSelection::Whisper { model_path, .. } => {
             // Normalize to Whisper contract
             log::debug!("[UPLOAD] Normalizing to Whisper WAV (16k mono s16)...");
-            let normalized_path = {
+            let normalized_file = NormalizedTempFile::new({
                 let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
                 let out_path = recordings_dir.join(format!("normalized_{}.wav", ts));
                 crate::ffmpeg::normalize_streaming(&app, &wav_path, &out_path)
                     .await
                     .map_err(|e| format!("Audio normalization (ffmpeg) failed: {}", e))?;
                 out_path
-            };
-            log::info!("[UPLOAD] Normalized WAV at {:?}", normalized_path);
+            });
+            log::info!("[UPLOAD] Normalized WAV at {:?}", normalized_file.path());
             let transcriber = {
                 let cache_state = app.state::<AsyncMutex<TranscriberCache>>();
                 let mut cache = cache_state.lock().await;
@@ -2828,25 +2889,24 @@ pub async fn transcribe_audio_file(
             };
 
             let result = transcriber.transcribe_with_translation(
-                &normalized_path,
+                normalized_file.path(),
                 Some(&language),
                 translate_to_english,
             )?;
-            let _ = std::fs::remove_file(&normalized_path);
             result
         }
         ActiveEngineSelection::Parakeet { model_name } => {
             // Normalize to Whisper/Parakeet contract first
             log::debug!("[UPLOAD] Normalizing to Whisper WAV (16k mono s16)...");
-            let normalized_path = {
+            let normalized_file = NormalizedTempFile::new({
                 let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
                 let out_path = recordings_dir.join(format!("normalized_{}.wav", ts));
                 crate::ffmpeg::normalize_streaming(&app, &wav_path, &out_path)
                     .await
                     .map_err(|e| format!("Audio normalization (ffmpeg) failed: {}", e))?;
                 out_path
-            };
-            log::info!("[UPLOAD] Normalized WAV at {:?}", normalized_path);
+            });
+            log::info!("[UPLOAD] Normalized WAV at {:?}", normalized_file.path());
             let parakeet_manager = app.state::<ParakeetManager>();
 
             parakeet_manager
@@ -2858,16 +2918,13 @@ pub async fn transcribe_audio_file(
                 .transcribe(
                     &app,
                     &model_name,
-                    normalized_path.clone(),
+                    normalized_file.path().to_path_buf(),
                     Some(language.clone()),
                     translate_to_english,
                 )
                 .await
             {
-                Ok(ParakeetResponse::Transcription { text, .. }) => {
-                    let _ = std::fs::remove_file(&normalized_path);
-                    text
-                }
+                Ok(ParakeetResponse::Transcription { text, .. }) => text,
                 Ok(other) => {
                     return Err(format!("Unexpected Parakeet response: {:?}", other));
                 }
@@ -2888,15 +2945,15 @@ pub async fn transcribe_audio_file(
         } => {
             // Normalize to Whisper contract (16k mono s16 WAV) for remote transcription
             log::debug!("[UPLOAD] Normalizing to Whisper WAV for remote transcription...");
-            let normalized_path = {
+            let normalized_file = NormalizedTempFile::new({
                 let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
                 let out_path = recordings_dir.join(format!("normalized_{}.wav", ts));
                 crate::ffmpeg::normalize_streaming(&app, &wav_path, &out_path)
                     .await
                     .map_err(|e| format!("Audio normalization (ffmpeg) failed: {}", e))?;
                 out_path
-            };
-            log::info!("[UPLOAD] Normalized WAV at {:?}", normalized_path);
+            });
+            log::info!("[UPLOAD] Normalized WAV at {:?}", normalized_file.path());
 
             log::info!(
                 "🌐 [Remote Upload] Starting transcription to '{}' ({}:{})",
@@ -2906,7 +2963,7 @@ pub async fn transcribe_audio_file(
             );
 
             // Read the normalized audio file
-            let audio_data = std::fs::read(&normalized_path)
+            let audio_data = std::fs::read(normalized_file.path())
                 .map_err(|e| format!("Failed to read audio file: {}", e))?;
 
             let audio_size_kb = audio_data.len() as f64 / 1024.0;
@@ -2943,9 +3000,6 @@ pub async fn transcribe_audio_file(
                 );
                 format!("Failed to connect to remote server: {}", e)
             })?;
-
-            // Clean up normalized file
-            let _ = std::fs::remove_file(&normalized_path);
 
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 log::warn!(
@@ -3097,15 +3151,15 @@ pub async fn transcribe_audio(
         } => {
             // Normalize to Whisper contract (16k mono s16 WAV) for remote transcription
             log::debug!("[CLIPBOARD] Normalizing to Whisper WAV for remote transcription...");
-            let normalized_path = {
+            let normalized_file = NormalizedTempFile::new({
                 let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
                 let out_path = recordings_dir.join(format!("normalized_clipboard_{}.wav", ts));
                 crate::ffmpeg::normalize_streaming(&app, &temp_path, &out_path)
                     .await
                     .map_err(|e| format!("Audio normalization (ffmpeg) failed: {}", e))?;
                 out_path
-            };
-            log::info!("[CLIPBOARD] Normalized WAV at {:?}", normalized_path);
+            });
+            log::info!("[CLIPBOARD] Normalized WAV at {:?}", normalized_file.path());
 
             log::info!(
                 "🌐 [Remote Clipboard] Starting transcription to '{}' ({}:{})",
@@ -3115,7 +3169,7 @@ pub async fn transcribe_audio(
             );
 
             // Read the normalized audio file
-            let audio_data = std::fs::read(&normalized_path)
+            let audio_data = std::fs::read(normalized_file.path())
                 .map_err(|e| format!("Failed to read audio file: {}", e))?;
 
             let audio_size_kb = audio_data.len() as f64 / 1024.0;
@@ -3152,9 +3206,6 @@ pub async fn transcribe_audio(
                 );
                 format!("Failed to connect to remote server: {}", e)
             })?;
-
-            // Clean up normalized file
-            let _ = std::fs::remove_file(&normalized_path);
 
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 log::warn!(
@@ -3573,9 +3624,38 @@ pub fn get_current_recording_state(app: AppHandle) -> RecordingStateResponse {
     }
 }
 
+/// Validate that a recording filename is safe (no path traversal)
+fn validate_recording_filename(filename: &str) -> Result<(), String> {
+    use std::path::Component;
+    let path = std::path::Path::new(filename);
+
+    // Reject empty filenames
+    if filename.is_empty() {
+        return Err("Empty filename".to_string());
+    }
+
+    // Reject absolute paths
+    if path.is_absolute() {
+        return Err("Absolute paths are not allowed".to_string());
+    }
+
+    // Reject any non-Normal components (../, ./, prefix, root)
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => {}
+            other => {
+                return Err(format!("Invalid path component: {:?}", other));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Check if a recording file exists in the recordings directory
 #[tauri::command]
 pub async fn check_recording_exists(app: AppHandle, filename: String) -> Result<bool, String> {
+    validate_recording_filename(&filename)?;
     let recordings_dir = app
         .path()
         .app_data_dir()
@@ -3587,6 +3667,7 @@ pub async fn check_recording_exists(app: AppHandle, filename: String) -> Result<
 /// Get the full path to a recording file for playback
 #[tauri::command]
 pub async fn get_recording_path(app: AppHandle, filename: String) -> Result<String, String> {
+    validate_recording_filename(&filename)?;
     let recordings_dir = app
         .path()
         .app_data_dir()
@@ -3607,20 +3688,23 @@ pub async fn save_retranscription(
     model: String,
     recording_file: String,
     source_recording_id: String,
-) -> Result<(), String> {
+    status: Option<String>,
+) -> Result<String, String> {
     // Save transcription to store with current timestamp
     let store = app
         .store("transcriptions")
         .map_err(|e| format!("Failed to get transcriptions store: {}", e))?;
 
     let timestamp = chrono::Utc::now().to_rfc3339();
+    let effective_status = status.unwrap_or_else(|| "completed".to_string());
     let transcription_data = serde_json::json!({
         "text": text.clone(),
         "model": model,
         "timestamp": timestamp.clone(),
         "recording_file": recording_file,
         "source_recording_id": source_recording_id,
-        "is_retranscription": true
+        "is_retranscription": true,
+        "status": effective_status
     });
 
     store.set(&timestamp, transcription_data.clone());
@@ -3645,7 +3729,7 @@ pub async fn save_retranscription(
         text.len(),
         source_recording_id
     );
-    Ok(())
+    Ok(timestamp)
 }
 
 /// Update an existing transcription entry in place (for re-transcription)
@@ -3655,6 +3739,7 @@ pub async fn update_transcription(
     timestamp: String,
     text: String,
     model: String,
+    status: Option<String>,
 ) -> Result<(), String> {
     let store = app
         .store("transcriptions")
@@ -3667,10 +3752,11 @@ pub async fn update_transcription(
 
     // Preserve original fields, update text, model, and status
     let mut updated = existing.clone();
+    let effective_status = status.unwrap_or_else(|| "completed".to_string());
     if let serde_json::Value::Object(ref mut map) = updated {
         map.insert("text".to_string(), serde_json::Value::String(text.clone()));
         map.insert("model".to_string(), serde_json::Value::String(model.clone()));
-        map.insert("status".to_string(), serde_json::Value::String("completed".to_string()));
+        map.insert("status".to_string(), serde_json::Value::String(effective_status.clone()));
     }
 
     store.set(&timestamp, updated.clone());
@@ -3683,7 +3769,8 @@ pub async fn update_transcription(
     let _ = emit_to_window(&app, "main", "transcription-updated", serde_json::json!({
         "timestamp": timestamp,
         "text": text,
-        "model": model
+        "model": model,
+        "status": effective_status
     }));
 
     // Refresh tray menu (best-effort)
