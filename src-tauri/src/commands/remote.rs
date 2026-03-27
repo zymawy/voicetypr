@@ -579,6 +579,14 @@ pub async fn check_remote_server_status(
             .ok_or_else(|| format!("Server '{}' not found after update", server_id))?
     };
 
+    let _ = app.emit(
+        "remote-server-status-changed",
+        serde_json::json!({
+            "serverId": server_id,
+            "status": format!("{:?}", new_status),
+        }),
+    );
+
     log::debug!("🔄 [REMOTE] Server {} status: {:?}", server_id, new_status);
     Ok(updated_server)
 }

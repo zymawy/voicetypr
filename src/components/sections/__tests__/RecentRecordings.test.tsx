@@ -194,3 +194,32 @@ describe('RecentRecordings re-transcription', () => {
     expect(onHistoryUpdate).toHaveBeenCalled();
   });
 });
+
+it('shows Soniox as a cloud retranscription source when configured', async () => {
+  const user = userEvent.setup();
+
+  invokeMock.mockImplementation(async (cmd: string) => {
+    switch (cmd) {
+      case 'check_recording_exists':
+        return true;
+      case 'get_model_status':
+        return {
+          models: [
+            { name: 'small.en', downloaded: true, engine: 'whisper', kind: 'local', requires_setup: false },
+            { name: 'soniox', display_name: 'Soniox (Cloud)', downloaded: true, engine: 'soniox', kind: 'cloud', requires_setup: false },
+          ],
+        };
+      case 'list_remote_servers':
+        return [];
+      default:
+        return null;
+    }
+  });
+
+  render(<RecentRecordings history={[historyItem]} onHistoryUpdate={vi.fn()} />);
+
+  const retranscribeButton = await screen.findByTitle('Re-transcribe');
+  await user.click(retranscribeButton);
+
+  expect(await screen.findByRole('menuitem', { name: 'Soniox (Cloud)' })).toBeInTheDocument();
+});

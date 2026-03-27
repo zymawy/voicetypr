@@ -241,6 +241,16 @@ describe('AudioUploadSection - Essential User Flows', () => {
         if (cmd === 'get_active_remote_server') {
           return 'remote-1';
         }
+        if (cmd === 'get_recognition_availability_snapshot') {
+          return {
+            whisper_available: false,
+            parakeet_available: false,
+            soniox_selected: false,
+            soniox_ready: false,
+            remote_selected: true,
+            remote_available: true,
+          };
+        }
         if (cmd === 'transcribe_audio_file') {
           return 'Remote transcript';
         }
@@ -285,8 +295,18 @@ describe('AudioUploadSection - Essential User Flows', () => {
         }
         if (cmd === 'list_remote_servers') {
           return [
-            { id: 'remote-1', name: 'Office PC', host: '192.168.1.10', port: 47842, model: 'large-v3' }
+            { id: 'remote-1', name: 'Office Mac', host: '10.0.0.7', port: 47842 },
           ];
+        }
+        if (cmd === 'get_recognition_availability_snapshot') {
+          return {
+            whisper_available: false,
+            parakeet_available: false,
+            soniox_selected: false,
+            soniox_ready: false,
+            remote_selected: true,
+            remote_available: true,
+          };
         }
         if (cmd === 'transcribe_audio_file') {
           return 'Remote history transcript';
@@ -309,7 +329,7 @@ describe('AudioUploadSection - Essential User Flows', () => {
 
       expect(invoke).toHaveBeenCalledWith('save_transcription', {
         text: 'Remote history transcript',
-        model: 'Remote: Office PC'
+        model: 'Remote: Office Mac'
       });
     });
 
@@ -442,5 +462,46 @@ describe('AudioUploadSection - Essential User Flows', () => {
         expect(screen.getByText('No speech detected in the audio file')).toBeInTheDocument();
       });
     });
+  });
+
+  it('blocks upload transcription when the selected remote is unavailable', async () => {
+    const user = userEvent.setup();
+    mockSettings.current_model = '';
+    mockSettings.current_model_engine = 'whisper';
+
+    vi.mocked(open).mockResolvedValue('/audio/offline-remote.mp3');
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'get_model_status') {
+        return { models: [{ ...readyLocalModel, downloaded: false }] };
+      }
+      if (cmd === 'get_active_remote_server') {
+        return 'remote-1';
+      }
+      if (cmd === 'get_recognition_availability_snapshot') {
+        return {
+          whisper_available: false,
+          parakeet_available: false,
+          soniox_selected: false,
+          soniox_ready: false,
+          remote_selected: true,
+          remote_available: false,
+        };
+      }
+      return null;
+    });
+
+    render(<AudioUploadSection />);
+
+    const selectButton = await screen.findByRole('button', { name: /select file/i });
+    await user.click(selectButton);
+    await waitFor(() => screen.getByText(/offline-remote.mp3/));
+
+    const transcribeButton = await screen.findByRole('button', { name: /transcribe/i });
+    await user.click(transcribeButton);
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Selected remote unavailable. Reconnect or choose another source.');
+    });
+    expect(invoke).not.toHaveBeenCalledWith('transcribe_audio_file', expect.anything());
   });
 });

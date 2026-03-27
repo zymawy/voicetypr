@@ -16,6 +16,19 @@ const mockSettings = {
   hotkey: 'Cmd+Shift+Space'
 };
 
+const mockModelAvailability = {
+  hasModels: true,
+  selectedModelAvailable: true,
+  remoteSelected: false,
+  remoteAvailable: false,
+  isChecking: false,
+  checkModels: vi.fn(),
+};
+
+vi.mock('@/hooks/useModelAvailability', () => ({
+  useModelAvailability: () => mockModelAvailability,
+}));
+
 vi.mock('@/contexts/SettingsContext', () => ({
   useSettings: () => ({
     settings: mockSettings,
@@ -114,6 +127,10 @@ describe('AppContainer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSettings.onboarding_completed = true;
+    mockModelAvailability.hasModels = true;
+    mockModelAvailability.isChecking = false;
+    mockModelAvailability.remoteSelected = false;
+    mockModelAvailability.remoteAvailable = false;
     mockInvoke.mockResolvedValue(null);
   });
 
@@ -125,7 +142,9 @@ describe('AppContainer', () => {
 
   it('shows onboarding when not completed and no remote server is active', async () => {
     mockSettings.onboarding_completed = false;
-    mockInvoke.mockResolvedValue(null);
+    mockModelAvailability.hasModels = false;
+    mockModelAvailability.remoteSelected = false;
+    mockModelAvailability.remoteAvailable = false;
     render(<AppContainer />);
 
     await waitFor(() => {
@@ -135,9 +154,24 @@ describe('AppContainer', () => {
     expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
   });
 
-  it('skips onboarding when a remote server is already active', async () => {
+  it('keeps onboarding visible when a remote server is selected but unavailable', async () => {
     mockSettings.onboarding_completed = false;
-    mockInvoke.mockResolvedValue('remote-1');
+    mockModelAvailability.hasModels = false;
+    mockModelAvailability.remoteSelected = true;
+    mockModelAvailability.remoteAvailable = false;
+
+    render(<AppContainer />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('onboarding')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
+  });
+
+  it('skips onboarding when a usable transcription source is available', async () => {
+    mockSettings.onboarding_completed = false;
+    mockModelAvailability.hasModels = true;
 
     render(<AppContainer />);
 

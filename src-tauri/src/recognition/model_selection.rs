@@ -13,6 +13,7 @@ pub struct RecognitionAvailabilitySnapshot {
     pub parakeet_available: bool,
     pub soniox_selected: bool,
     pub soniox_ready: bool,
+    pub remote_selected: bool,
     pub remote_available: bool,
 }
 
@@ -64,12 +65,18 @@ pub async fn recognition_availability_snapshot(
         Err(_) => (false, false),
     };
 
-    let remote_available =
+    let (remote_selected, remote_available) =
         if let Some(remote_settings) = app.try_state::<AsyncMutex<RemoteSettings>>() {
             let settings = remote_settings.lock().await;
-            settings.get_active_connection().is_some()
+            let active_connection = settings.get_active_connection().cloned();
+            let selected = active_connection.is_some();
+            let available = active_connection
+                .as_ref()
+                .map(|connection| matches!(connection.status, crate::remote::settings::ConnectionStatus::Online))
+                .unwrap_or(false);
+            (selected, available)
         } else {
-            false
+            (false, false)
         };
 
     RecognitionAvailabilitySnapshot {
@@ -77,8 +84,16 @@ pub async fn recognition_availability_snapshot(
         parakeet_available,
         soniox_selected,
         soniox_ready,
+        remote_selected,
         remote_available,
     }
+}
+
+#[tauri::command]
+pub async fn get_recognition_availability_snapshot(
+    app: tauri::AppHandle,
+ ) -> Result<RecognitionAvailabilitySnapshot, String> {
+    Ok(recognition_availability_snapshot(&app).await)
 }
 
 fn pick_best_parakeet_model(models: Vec<parakeet::ParakeetModelStatus>) -> Option<String> {
@@ -198,16 +213,31 @@ mod tests {
     use super::RecognitionAvailabilitySnapshot;
 
     #[test]
-    fn any_available_is_true_when_remote_is_active() {
+    fn any_available_is_true_when_authenticated_remote_is_available() {
         let snapshot = RecognitionAvailabilitySnapshot {
             whisper_available: false,
             parakeet_available: false,
             soniox_selected: false,
             soniox_ready: false,
+            remote_selected: true,
             remote_available: true,
         };
 
         assert!(snapshot.any_available());
+    }
+
+    #[test]
+    fn any_available_is_false_when_remote_is_only_selected() {
+        let snapshot = RecognitionAvailabilitySnapshot {
+            whisper_available: false,
+            parakeet_available: false,
+            soniox_selected: false,
+            soniox_ready: false,
+            remote_selected: true,
+            remote_available: false,
+        };
+
+        assert!(!snapshot.any_available());
     }
 
     #[test]
@@ -217,6 +247,7 @@ mod tests {
             parakeet_available: false,
             soniox_selected: false,
             soniox_ready: false,
+            remote_selected: false,
             remote_available: false,
         };
 

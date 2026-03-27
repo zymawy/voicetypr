@@ -15,7 +15,7 @@ import { useCanRecord, useCanAutoInsert } from "@/contexts/ReadinessContext";
 import { useModelManagementContext } from "@/contexts/ModelManagementContext";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { AlertCircle, AlertTriangle, Mic, Trash2, Search, Copy, Calendar, Download, RotateCcw, Loader2, FolderOpen, Server, Cpu } from "lucide-react";
+import { AlertCircle, AlertTriangle, Mic, Trash2, Search, Copy, Calendar, Download, RotateCcw, Loader2, FolderOpen, Server, Cpu, Cloud } from "lucide-react";
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
 interface TranscriptionSource {
   id: string;
   name: string;
-  type: 'local' | 'remote';
+  type: 'local' | 'cloud' | 'remote';
 }
 
 // Interface for remote server connection
@@ -162,17 +162,18 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
     const sources: TranscriptionSource[] = [];
 
     try {
-      // Fetch local models using get_model_status (this is fast)
-      const response = await invoke<{models: {name: string; downloaded: boolean; engine: string}[]}>("get_model_status");
-      // Filter to downloaded local models (whisper and parakeet, not cloud/soniox)
-      const downloadedLocalModels = response.models.filter(m =>
-        m.downloaded && (m.engine === 'whisper' || m.engine === 'parakeet')
+      const response = await invoke<{models: {name: string; downloaded: boolean; engine: string; kind?: string; requires_setup?: boolean; display_name?: string}[]}>('get_model_status');
+      const availableSources = response.models.filter(m =>
+        m.downloaded && !(m.requires_setup ?? false)
       );
-      for (const model of downloadedLocalModels) {
+      for (const model of availableSources) {
+        const sourceType = model.kind === 'cloud' ? 'cloud' : 'local';
+        const fallbackName = MODEL_DISPLAY_NAMES[model.name] || model.name;
+        const sourceName = model.display_name || (sourceType === 'cloud' ? `${fallbackName} (Cloud)` : fallbackName);
         sources.push({
-          id: `local:${model.name}:${model.engine}`,
-          name: MODEL_DISPLAY_NAMES[model.name] || model.name,
-          type: 'local',
+          id: `${sourceType}:${model.name}:${model.engine}`,
+          name: sourceName,
+          type: sourceType,
         });
       }
     } catch (error) {
@@ -214,10 +215,12 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
     const modelNameOrServerId = parts[1];
     const engine = parts[2]; // undefined for remote
 
-    // Get the display name for the model being used
     let displayModelName: string;
     if (sourceType === 'local') {
       displayModelName = MODEL_DISPLAY_NAMES[modelNameOrServerId] || modelNameOrServerId;
+    } else if (sourceType === 'cloud') {
+      const source = transcriptionSources.find(s => s.id === sourceId);
+      displayModelName = source ? source.name : `${MODEL_DISPLAY_NAMES[modelNameOrServerId] || modelNameOrServerId} (Cloud)`;
     } else {
       const server = transcriptionSources.find(s => s.id === sourceId);
       displayModelName = server ? server.name : modelNameOrServerId;
@@ -246,7 +249,9 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
           const server = transcriptionSources.find(s => s.id === sourceId);
           return server ? `Remote: ${server.name}` : `Remote: ${modelNameOrServerId}`;
         })()
-      : modelNameOrServerId;
+      : sourceType === 'cloud'
+        ? displayModelName
+        : modelNameOrServerId;
     let retryTimestamp: string | null = null;
 
     try {
@@ -265,21 +270,18 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
       let result: string;
       let modelName: string;
 
-      if (sourceType === 'local') {
-        // Re-transcribe using local model (whisper or parakeet)
-        result = await invoke<string>("transcribe_audio_file", {
+      if (sourceType === 'local' || sourceType === 'cloud') {
+        result = await invoke<string>('transcribe_audio_file', {
           filePath: fullPath,
           modelName: modelNameOrServerId,
           modelEngine: engine || null,
         });
-        modelName = modelNameOrServerId;
+        modelName = sourceType === 'cloud' ? displayModelName : modelNameOrServerId;
       } else if (sourceType === 'remote') {
-        // Re-transcribe using remote server via dedicated command
-        result = await invoke<string>("transcribe_remote", {
+        result = await invoke<string>('transcribe_remote', {
           serverId: modelNameOrServerId,
           audioPath: fullPath,
         });
-        // Find the server name for the model display
         const server = transcriptionSources.find(s => s.id === sourceId);
         modelName = server ? `Remote: ${server.name}` : `Remote: ${modelNameOrServerId}`;
       } else {
@@ -601,11 +603,10 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                                     </div>
                                   ) : transcriptionSources.length === 0 ? (
                                     <div className="py-2 text-center text-xs text-muted-foreground">
-                                      No models available
+                                      No transcription sources available
                                     </div>
                                   ) : (
                                     <>
-                                      {/* Local models */}
                                       {transcriptionSources.filter(s => s.type === 'local').length > 0 && (
                                         <DropdownMenuGroup>
                                           <DropdownMenuLabel className="text-[10px] text-muted-foreground flex items-center gap-1 py-0.5">
@@ -637,7 +638,31 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                                             ))}
                                         </DropdownMenuGroup>
                                       )}
-                                      {/* Remote servers */}
+                                      {transcriptionSources.filter(s => s.type === 'cloud').length > 0 && (
+                                        <>
+                                          <DropdownMenuSeparator />
+                                          <DropdownMenuGroup>
+                                            <DropdownMenuLabel className="text-[10px] text-muted-foreground flex items-center gap-1 py-0.5">
+                                              <Cloud className="w-2.5 h-2.5" />
+                                              Cloud Providers
+                                            </DropdownMenuLabel>
+                                            {transcriptionSources
+                                              .filter(s => s.type === 'cloud')
+                                              .map(source => (
+                                                <DropdownMenuItem
+                                                  key={source.id}
+                                                  className="text-xs py-1"
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    handleReTranscribe(item, source.id);
+                                                  }}
+                                                >
+                                                  {source.name}
+                                                </DropdownMenuItem>
+                                              ))}
+                                          </DropdownMenuGroup>
+                                        </>
+                                      )}
                                       {transcriptionSources.filter(s => s.type === 'remote').length > 0 && (
                                         <>
                                           <DropdownMenuSeparator />
@@ -752,11 +777,10 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                                       </div>
                                     ) : transcriptionSources.length === 0 ? (
                                       <div className="py-2 text-center text-xs text-muted-foreground">
-                                        No models available
+                                        No transcription sources available
                                       </div>
                                     ) : (
                                       <>
-                                        {/* Local models */}
                                         {transcriptionSources.filter(s => s.type === 'local').length > 0 && (
                                           <DropdownMenuGroup>
                                             <DropdownMenuLabel className="text-[10px] text-muted-foreground flex items-center gap-1 py-0.5">
@@ -766,12 +790,10 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                                             {transcriptionSources
                                               .filter(s => s.type === 'local')
                                               .sort((a, b) => {
-                                                // Sort by modelOrder from context
                                                 const aModelName = a.id.split(':')[1];
                                                 const bModelName = b.id.split(':')[1];
                                                 const aIndex = modelOrder.indexOf(aModelName);
                                                 const bIndex = modelOrder.indexOf(bModelName);
-                                                // If not found in modelOrder, put at end
                                                 const aOrder = aIndex === -1 ? 999 : aIndex;
                                                 const bOrder = bIndex === -1 ? 999 : bIndex;
                                                 return aOrder - bOrder;
@@ -790,7 +812,31 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                                               ))}
                                           </DropdownMenuGroup>
                                         )}
-                                        {/* Remote servers */}
+                                        {transcriptionSources.filter(s => s.type === 'cloud').length > 0 && (
+                                          <>
+                                            <DropdownMenuSeparator />
+                                            <DropdownMenuGroup>
+                                              <DropdownMenuLabel className="text-[10px] text-muted-foreground flex items-center gap-1 py-0.5">
+                                                <Cloud className="w-2.5 h-2.5" />
+                                                Cloud Providers
+                                              </DropdownMenuLabel>
+                                              {transcriptionSources
+                                                .filter(s => s.type === 'cloud')
+                                                .map(source => (
+                                                  <DropdownMenuItem
+                                                    key={source.id}
+                                                    className="text-xs py-1"
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      handleReTranscribe(item, source.id);
+                                                    }}
+                                                  >
+                                                    {source.name}
+                                                  </DropdownMenuItem>
+                                                ))}
+                                            </DropdownMenuGroup>
+                                          </>
+                                        )}
                                         {transcriptionSources.filter(s => s.type === 'remote').length > 0 && (
                                           <>
                                             <DropdownMenuSeparator />

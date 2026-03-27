@@ -2,7 +2,6 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::audio::recorder::AudioRecorder;
-use crate::commands::license::check_license_status_internal;
 use crate::commands::settings::{get_settings, resolve_pill_indicator_mode, Settings};
 use crate::license::LicenseState;
 use crate::media::MediaPauseController;
@@ -160,8 +159,20 @@ impl Drop for NormalizedTempFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_hide_pill_when_idle, NormalizedTempFile};
+    use super::{recording_license_state, should_hide_pill_when_idle, NormalizedTempFile, RecordingLicenseState};
+    use crate::commands::license::CachedLicense;
+    use crate::license::{LicenseState, LicenseStatus};
     use std::fs;
+
+    fn cached_license(status: LicenseState) -> CachedLicense {
+        CachedLicense::new(LicenseStatus {
+            status,
+            trial_days_left: None,
+            license_type: None,
+            license_key: None,
+            expires_at: None,
+        })
+    }
 
     #[test]
     fn should_hide_pill_when_idle_for_never() {
@@ -176,6 +187,31 @@ mod tests {
     #[test]
     fn should_hide_pill_when_idle_for_always() {
         assert!(!should_hide_pill_when_idle("always"));
+    }
+
+    #[test]
+    fn recording_license_state_is_loading_when_cache_absent() {
+        assert_eq!(recording_license_state(None), RecordingLicenseState::Loading);
+    }
+
+    #[test]
+    fn recording_license_state_blocks_expired_license() {
+        let cached = cached_license(LicenseState::Expired);
+        assert_eq!(recording_license_state(Some(&cached)), RecordingLicenseState::Blocked);
+    }
+
+    #[test]
+    fn recording_license_state_blocks_missing_license() {
+        let cached = cached_license(LicenseState::None);
+        assert_eq!(recording_license_state(Some(&cached)), RecordingLicenseState::Blocked);
+    }
+
+    #[test]
+    fn recording_license_state_allows_trial_and_licensed() {
+        let trial = cached_license(LicenseState::Trial);
+        let licensed = cached_license(LicenseState::Licensed);
+        assert_eq!(recording_license_state(Some(&trial)), RecordingLicenseState::Ready);
+        assert_eq!(recording_license_state(Some(&licensed)), RecordingLicenseState::Ready);
     }
 
     #[test]
@@ -842,6 +878,24 @@ fn select_best_fallback_model(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingLicenseState {
+    Ready,
+    Loading,
+    Blocked,
+}
+
+fn recording_license_state(
+    cache: Option<&crate::commands::license::CachedLicense>,
+) -> RecordingLicenseState {
+    match cache {
+        Some(cached) if matches!(cached.status.status, LicenseState::Expired | LicenseState::None) => RecordingLicenseState::Blocked,
+        Some(_) => RecordingLicenseState::Ready,
+        None => RecordingLicenseState::Loading,
+    }
+}
+
+
 /// Pre-recording validation using the readiness state
 async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> {
     let validate_start = std::time::Instant::now();
@@ -875,22 +929,21 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
         );
     }
 
-    // Check cached license status (populated at startup - no network call)
-    // This is fast because it only reads from memory
+    // Check cached license status (warmed during startup/license transitions - no network call)
     let app_state = app.state::<AppState>();
     let cache = app_state.license_cache.read().await;
 
-    if let Some(cached) = cache.as_ref() {
-        if matches!(cached.status.status, LicenseState::Expired | LicenseState::None) {
-            log::warn!("Recording blocked: license is {:?}", cached.status.status);
+    match recording_license_state(cache.as_ref()) {
+        RecordingLicenseState::Blocked => {
+            if let Some(cached) = cache.as_ref() {
+                log::warn!("Recording blocked: license is {:?}", cached.status.status);
+            }
 
-            // Show and focus the main window
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
 
-            // Emit error event with guidance
             let _ = emit_to_window(
                 app,
                 "main",
@@ -903,8 +956,22 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
             );
             return Err("License required to record".to_string());
         }
+        RecordingLicenseState::Ready => {}
+        RecordingLicenseState::Loading => {
+            log::warn!("Recording blocked: license cache not initialized yet");
+            let _ = emit_to_window(
+                app,
+                "main",
+                "license-loading",
+                serde_json::json!({
+                    "title": "Checking License",
+                    "message": "License status is still loading. Please try again in a moment.",
+                    "action": "wait"
+                }),
+            );
+            return Err("License status is still loading. Please try again in a moment.".to_string());
+        }
     }
-    // If no cache exists yet, allow recording (startup check hasn't completed)
 
     log::info!("⏱️ [VALIDATE] validation complete (+{}ms)", validate_start.elapsed().as_millis());
     Ok(())

@@ -8,20 +8,53 @@ interface ModelStatusResponse {
   models: ModelInfo[];
 }
 
+interface RecognitionAvailabilitySnapshot {
+  whisper_available: boolean;
+  parakeet_available: boolean;
+  soniox_selected: boolean;
+  soniox_ready: boolean;
+  remote_selected: boolean;
+  remote_available: boolean;
+}
+
 export function useModelAvailability() {
   const { settings } = useSettings();
   const [hasModels, setHasModels] = useState<boolean | null>(null);
   const [selectedModelAvailable, setSelectedModelAvailable] = useState<boolean | null>(null);
+  const [remoteSelected, setRemoteSelected] = useState(false);
+  const [remoteAvailable, setRemoteAvailable] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
 
   const checkModels = useCallback(async () => {
     setIsChecking(true);
     try {
-      const status = await invoke<ModelStatusResponse>('get_model_status');
+      const [status, availabilityResult] = await Promise.all([
+        invoke<ModelStatusResponse>('get_model_status'),
+        invoke<RecognitionAvailabilitySnapshot | null>('get_recognition_availability_snapshot'),
+      ]);
+
+      const availability = availabilityResult ?? {
+        whisper_available: false,
+        parakeet_available: false,
+        soniox_selected: false,
+        soniox_ready: false,
+        remote_selected: false,
+        remote_available: false,
+      };
+
       const readyModels = status.models.filter(
         (model) => model.downloaded && !model.requires_setup
       );
-      setHasModels(readyModels.length > 0);
+
+      const hasAnyReadySource = readyModels.length > 0 || availability.remote_available;
+      setHasModels(hasAnyReadySource);
+      setRemoteSelected(availability.remote_selected);
+      setRemoteAvailable(availability.remote_available);
+
+      if (availability.remote_selected) {
+        setSelectedModelAvailable(availability.remote_available);
+        return;
+      }
 
       const selectedModel = settings?.current_model;
       if (selectedModel) {
@@ -36,40 +69,43 @@ export function useModelAvailability() {
       console.error('Failed to check model availability:', error);
       setHasModels(false);
       setSelectedModelAvailable(false);
+      setRemoteSelected(false);
+      setRemoteAvailable(false);
     } finally {
       setIsChecking(false);
     }
   }, [settings]);
 
-  // Check on mount and when settings change
   useEffect(() => {
     checkModels();
   }, [checkModels, settings]);
 
-  // Listen for model events
   useEffect(() => {
     const unlistenDownloaded = listen('model-downloaded', () => {
-      console.log('[useModelAvailability] Model downloaded event received');
       checkModels();
     });
 
     const unlistenDeleted = listen('model-deleted', () => {
-      console.log('[useModelAvailability] Model deleted event received');
       checkModels();
     });
 
     const unlistenModelChanged = listen('model-changed', () => {
-      console.log('[useModelAvailability] Model changed event received');
       checkModels();
     });
 
     const unlistenCloudSaved = listen('stt-key-saved', () => {
-      console.log('[useModelAvailability] Cloud provider connected');
       checkModels();
     });
 
     const unlistenCloudRemoved = listen('stt-key-removed', () => {
-      console.log('[useModelAvailability] Cloud provider disconnected');
+      checkModels();
+    });
+
+    const unlistenSharingChanged = listen('sharing-status-changed', () => {
+      checkModels();
+    });
+
+    const unlistenRemoteStatusChanged = listen('remote-server-status-changed', () => {
       checkModels();
     });
 
@@ -79,7 +115,9 @@ export function useModelAvailability() {
         unlistenDeleted,
         unlistenModelChanged,
         unlistenCloudSaved,
-        unlistenCloudRemoved
+        unlistenCloudRemoved,
+        unlistenSharingChanged,
+        unlistenRemoteStatusChanged,
       ]).then(unsubs => {
         unsubs.forEach(unsub => unsub());
       });
@@ -89,6 +127,8 @@ export function useModelAvailability() {
   return {
     hasModels,
     selectedModelAvailable,
+    remoteSelected,
+    remoteAvailable,
     isChecking,
     checkModels
   };

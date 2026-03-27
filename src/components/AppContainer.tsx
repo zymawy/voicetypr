@@ -10,6 +10,7 @@ import { TabContainer } from "./tabs/TabContainer";
 import { useReadiness } from "@/contexts/ReadinessContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { useEventCoordinator } from "@/hooks/useEventCoordinator";
+import { useModelAvailability } from '@/hooks/useModelAvailability';
 import { useModelManagementContext } from "@/contexts/ModelManagementContext";
 import { updateService } from "@/services/updateService";
 import { loadApiKeysToCache } from "@/utils/keyring";
@@ -29,10 +30,11 @@ interface ErrorEventPayload {
 export function AppContainer() {
   const { registerEvent } = useEventCoordinator("main");
   const [activeSection, setActiveSection] = useState<string>("overview");
-  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [forceShowOnboarding, setForceShowOnboarding] = useState(false);
   const { settings, refreshSettings } = useSettings();
   const { checkAccessibilityPermission, checkMicrophonePermission } = useReadiness();
 
+  const { hasModels, isChecking: isCheckingModelAvailability } = useModelAvailability();
   // Use the model management context for onboarding
   const modelManagement = useModelManagementContext();
 
@@ -45,7 +47,7 @@ export function AppContainer() {
 
     const handleNoModels = () => {
       console.log("No models available - redirecting to onboarding");
-      setShowOnboarding(true);
+      setForceShowOnboarding(true);
     };
 
     window.addEventListener("no-models-available", handleNoModels);
@@ -197,36 +199,11 @@ export function AppContainer() {
     };
   }, [registerEvent]);
 
-  useEffect(() => {
-    let cancelled = false;
+  const showOnboarding = Boolean(
+    forceShowOnboarding ||
+    (!settings?.onboarding_completed && hasModels === false && !isCheckingModelAvailability)
+  );
 
-    const syncOnboardingVisibility = async () => {
-      if (!settings) return;
-
-      if (settings.onboarding_completed) {
-        setShowOnboarding(false);
-        return;
-      }
-
-      try {
-        const activeRemoteServer = await invoke<string | null>("get_active_remote_server");
-        if (!cancelled) {
-          setShowOnboarding(!activeRemoteServer);
-        }
-      } catch (error) {
-        console.error("Failed to check active remote server:", error);
-        if (!cancelled) {
-          setShowOnboarding(true);
-        }
-      }
-    };
-
-    syncOnboardingVisibility();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [settings]);
 
   // Mark when onboarding is being shown
   useEffect(() => {
@@ -261,8 +238,7 @@ export function AppContainer() {
       <AppErrorBoundary>
         <OnboardingDesktop
           onComplete={() => {
-            setShowOnboarding(false);
-            // Reload settings after onboarding
+            setForceShowOnboarding(false);
             refreshSettings();
           }}
           modelManagement={modelManagement}

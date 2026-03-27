@@ -26,7 +26,7 @@ export function AudioUploadSection() {
   const [isDragging, setIsDragging] = useState(false);
   const [activeRemoteServer, setActiveRemoteServer] = useState<string | null>(null);
   const { settings } = useSettings();
-  const { selectedModelAvailable } = useModelAvailability();
+  const { selectedModelAvailable, remoteSelected, remoteAvailable } = useModelAvailability();
   const {
     selectedFile,
     status,
@@ -40,7 +40,6 @@ export function AudioUploadSection() {
   const isProcessing = status === 'processing';
   const effectiveFileName = selectedFile?.name || null;
   const hasEffectiveSelection = !!selectedFile;
-  const hasRemoteModelSource = !!activeRemoteServer;
 
   const resolveHistoryModelName = async () => {
     if (!activeRemoteServer) {
@@ -121,12 +120,17 @@ export function AudioUploadSection() {
       return;
     }
 
-    if (!settings?.current_model && !hasRemoteModelSource) {
-      toast.error("Select a speech model in Models before transcribing.");
+    if (remoteSelected && !remoteAvailable) {
+      toast.error('Selected remote unavailable. Reconnect or choose another source.');
       return;
     }
 
-    if (!hasRemoteModelSource && selectedModelAvailable === false) {
+    if (!settings?.current_model && !remoteAvailable) {
+      toast.error('Select a speech model in Models before transcribing.');
+      return;
+    }
+
+    if (!remoteSelected && selectedModelAvailable === false) {
       const engine = settings?.current_model_engine || 'whisper';
       toast.error(
         engine === 'soniox'
