@@ -542,34 +542,38 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                   <div className="space-y-2">
                     {items.map((item) => {
                       const isFailed = item.status === 'failed';
+                      const isPersistedInProgress = item.status === 'in_progress';
+                      const isInProgress = reTranscribingIds.has(item.id) || isPersistedInProgress;
                       return (
                       <div
                         key={item.id}
                         className={cn(
                           "group relative rounded-lg cursor-pointer",
                           "bg-card border",
-                          reTranscribingIds.has(item.id)
+                          isInProgress
                             ? "border-primary/50"
                             : isFailed
                             ? "border-amber-500/50 bg-amber-500/5"
                             : "border-border/50 hover:bg-accent/30 hover:border-border",
                           "transition-all duration-200"
                         )}
-                        onClick={() => !isFailed && handleCopy(item.text)}
+                        onClick={() => !isFailed && !isInProgress && handleCopy(item.text)}
                         onMouseEnter={() => setHoveredId(item.id)}
                         onMouseLeave={() => setHoveredId(null)}
                       >
                         {/* Re-transcribing status bar */}
-                        {reTranscribingIds.has(item.id) && (
+                        {isInProgress && (
                           <div className="flex items-center gap-2 px-4 py-2 bg-primary/10 border-b border-primary/20 rounded-t-lg">
                             <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
                             <span className="text-xs text-primary font-medium">
-                              Re-transcribing with {reTranscribingModels.get(item.id)}...
+                              {isPersistedInProgress && !reTranscribingIds.has(item.id)
+                                ? `Re-transcription in progress with ${item.model}...`
+                                : `Re-transcribing with ${reTranscribingModels.get(item.id)}...`}
                             </span>
                           </div>
                         )}
                         {/* Failed status bar */}
-                        {isFailed && !reTranscribingIds.has(item.id) && (
+                        {isFailed && !isInProgress && (
                           <div className="flex items-center justify-between gap-2 px-4 py-2 bg-amber-500/10 border-b border-amber-500/20 rounded-t-lg">
                             <div className="flex items-center gap-2">
                               <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
@@ -719,28 +723,31 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                               "flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity",
                               (hoveredId === item.id || dropdownOpenId === item.id) && "opacity-100"
                             )}>
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleCopy(item.text);
-                                }}
-                                className="p-1.5 rounded hover:bg-accent transition-colors"
-                                title="Copy"
-                              >
-                                <Copy className="w-4 h-4 text-muted-foreground" />
-                              </button>
-                              {/* Show in folder button - only show if recording file exists and verified */}
-                              {verifiedRecordings.has(item.id) && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleShowInFolder(item);
-                                  }}
-                                  className="p-1.5 rounded hover:bg-accent transition-colors"
-                                  title="Show recording in folder"
-                                >
-                                  <FolderOpen className="w-4 h-4 text-muted-foreground" />
-                                </button>
+                              {!isInProgress && (
+                                <>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleCopy(item.text);
+                                    }}
+                                    className="p-1.5 rounded hover:bg-accent transition-colors"
+                                    title="Copy"
+                                  >
+                                    <Copy className="w-4 h-4 text-muted-foreground" />
+                                  </button>
+                                  {verifiedRecordings.has(item.id) && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleShowInFolder(item);
+                                      }}
+                                      className="p-1.5 rounded hover:bg-accent transition-colors"
+                                      title="Show recording in folder"
+                                    >
+                                      <FolderOpen className="w-4 h-4 text-muted-foreground" />
+                                    </button>
+                                  )}
+                                </>
                               )}
                               {/* Re-transcribe button - only show if recording file exists and verified */}
                               {verifiedRecordings.has(item.id) && (
@@ -753,12 +760,12 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                                       onClick={(e) => e.stopPropagation()}
                                       className={cn(
                                         "p-1.5 rounded hover:bg-accent transition-colors",
-                                        reTranscribingIds.has(item.id) && "pointer-events-none"
+                                        isInProgress && "pointer-events-none"
                                       )}
                                       title="Re-transcribe"
-                                      disabled={reTranscribingIds.has(item.id)}
+                                      disabled={isInProgress}
                                     >
-                                      {reTranscribingIds.has(item.id) ? (
+                                      {isInProgress ? (
                                         <Loader2 className="w-4 h-4 text-muted-foreground animate-spin" />
                                       ) : (
                                         <RotateCcw className="w-4 h-4 text-muted-foreground" />

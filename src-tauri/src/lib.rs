@@ -1332,6 +1332,17 @@ async fn perform_startup_checks(app: tauri::AppHandle) {
         log::warn!("Failed to warm runtime license cache during startup checks: {}", err);
     }
 
+    if let Some(remote_settings) = app.try_state::<AsyncMutex<crate::remote::settings::RemoteSettings>>() {
+        let active_remote_id = {
+            let settings = remote_settings.lock().await;
+            settings.active_connection_id.clone()
+        };
+        if let Some(active_remote_id) = active_remote_id {
+            if let Err(err) = crate::commands::remote::refresh_saved_connection_status(&app, &active_remote_id).await {
+                log::warn!("Failed to refresh active remote status during startup checks: {}", err);
+            }
+        }
+    }
 
     let availability = recognition_availability_snapshot(&app).await;
     log_model_operation(

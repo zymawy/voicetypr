@@ -276,7 +276,7 @@ describe('AudioUploadSection - Essential User Flows', () => {
       expect(invoke).toHaveBeenCalledWith('transcribe_audio_file', {
         filePath: '/audio/remote-file.mp3',
         modelName: '',
-        modelEngine: 'whisper'
+        modelEngine: null
       });
     });
 
@@ -330,6 +330,71 @@ describe('AudioUploadSection - Essential User Flows', () => {
       expect(invoke).toHaveBeenCalledWith('save_transcription', {
         text: 'Remote history transcript',
         model: 'Remote: Office Mac'
+      });
+    });
+
+    it('labels Soniox upload history entries as cloud sources', async () => {
+      const user = userEvent.setup();
+      mockSettings.current_model = 'soniox';
+      mockSettings.current_model_engine = 'soniox';
+
+      vi.mocked(open).mockResolvedValue('/audio/soniox-file.mp3');
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'get_model_status') {
+          return {
+            models: [
+              {
+                name: 'soniox',
+                display_name: 'Soniox (Cloud)',
+                size: 0,
+                url: '',
+                sha256: '',
+                downloaded: true,
+                speed_score: 9,
+                accuracy_score: 10,
+                recommended: true,
+                engine: 'soniox',
+                kind: 'cloud',
+                requires_setup: false,
+              },
+            ],
+          };
+        }
+        if (cmd === 'get_active_remote_server') {
+          return null;
+        }
+        if (cmd === 'get_recognition_availability_snapshot') {
+          return {
+            whisper_available: false,
+            parakeet_available: false,
+            soniox_selected: true,
+            soniox_ready: true,
+            remote_selected: false,
+            remote_available: false,
+          };
+        }
+        if (cmd === 'transcribe_audio_file') {
+          return 'Soniox transcript';
+        }
+        return null;
+      });
+
+      render(<AudioUploadSection />);
+
+      const selectButton = await screen.findByRole('button', { name: /select file/i });
+      await user.click(selectButton);
+      await waitFor(() => screen.getByText(/soniox-file.mp3/));
+
+      const transcribeButton = await screen.findByRole('button', { name: /transcribe/i });
+      await user.click(transcribeButton);
+
+      await waitFor(() => {
+        expect(screen.getByText('Soniox transcript')).toBeInTheDocument();
+      });
+
+      expect(invoke).toHaveBeenCalledWith('save_transcription', {
+        text: 'Soniox transcript',
+        model: 'Soniox (Cloud)'
       });
     });
 

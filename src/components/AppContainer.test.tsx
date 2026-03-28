@@ -169,17 +169,15 @@ describe('AppContainer', () => {
     expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
   });
 
-  it('skips onboarding when a usable transcription source is available', async () => {
+  it('shows onboarding when setup is explicitly reset even if sources are available', async () => {
     mockSettings.onboarding_completed = false;
-    mockModelAvailability.hasModels = true;
-
     render(<AppContainer />);
 
     await waitFor(() => {
-      expect(screen.queryByTestId('onboarding')).not.toBeInTheDocument();
+      expect(screen.getByTestId('onboarding')).toBeInTheDocument();
     });
 
-    expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+    expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
   });
 
   it('allows navigation between sections', () => {

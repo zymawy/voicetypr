@@ -4,7 +4,7 @@ use crate::commands::remote::{resolve_shareable_model_config, save_remote_settin
 use crate::menu::should_include_remote_connection_in_tray;
 use crate::parakeet::ParakeetManager;
 use crate::remote::lifecycle::RemoteServerManager;
-use crate::remote::settings::RemoteSettings;
+use crate::remote::settings::{ConnectionStatus, RemoteSettings};
 use crate::whisper::languages::{validate_language, SUPPORTED_LANGUAGES};
 use crate::whisper::manager::WhisperManager;
 use crate::AppState;
@@ -302,6 +302,46 @@ pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
     Ok(settings)
 }
 
+async fn sync_running_sharing_server_to_model(
+    app: &AppHandle,
+    model_name: &str,
+    engine: &str,
+ ) -> Result<(), String> {
+    let server_manager = app.state::<AsyncMutex<RemoteServerManager>>();
+    let mut server = server_manager.lock().await;
+    if !server.is_running() {
+        return Ok(());
+    }
+
+    match resolve_shareable_model_config(app, model_name, engine).await {
+        Ok((model_path, resolved_engine)) => {
+            server.update_model(model_path, model_name.to_string(), resolved_engine);
+            Ok(())
+        }
+        Err(err) => {
+            log::warn!("Stopping sharing because the selected model is no longer shareable: {}", err);
+            server.stop().await;
+            drop(server);
+
+            let remote_state = app.state::<AsyncMutex<RemoteSettings>>();
+            let mut remote_settings = remote_state.lock().await;
+            remote_settings.server_config.enabled = false;
+            save_remote_settings(app, &remote_settings)?;
+
+            let _ = app.emit(
+                "sharing-status-changed",
+                json!({
+                    "enabled": false,
+                    "port": null,
+                    "model_name": null
+                }),
+            );
+            Ok(())
+        }
+    }
+}
+
+
 #[tauri::command]
 pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let store = app.store("settings").map_err(|e| e.to_string())?;
@@ -400,6 +440,15 @@ pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), Str
         store.set("sharing_password", json!(pwd));
     } else {
         store.delete("sharing_password");
+    }
+
+    if let Some(remote_state) = app.try_state::<AsyncMutex<RemoteSettings>>() {
+        let mut remote_settings = remote_state.lock().await;
+        if let Some(port) = settings.sharing_port {
+            remote_settings.server_config.port = port;
+        }
+        remote_settings.server_config.password = settings.sharing_password.clone();
+        save_remote_settings(&app, &remote_settings)?;
     }
 
     // Recording persistence settings
@@ -513,22 +562,7 @@ pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), Str
         }
 
         // Update the sharing server's model if it's running
-        {
-            use tauri::async_runtime::RwLock as AsyncRwLock;
-            let server_manager = app.state::<AsyncMutex<RemoteServerManager>>();
-            let mut server = server_manager.lock().await;
-            if server.is_running() {
-                let model_path: std::path::PathBuf = if !is_parakeet_engine && !is_cloud_engine {
-                    let whisper_state = app.state::<AsyncRwLock<WhisperManager>>();
-                    let manager = whisper_state.read().await;
-                    manager.get_model_path(&settings.current_model).unwrap_or_default()
-                } else {
-                    std::path::PathBuf::new()
-                };
-                server.update_model(model_path, settings.current_model.clone(), settings.current_model_engine.clone());
-                log::info!("Remote server model updated to: {} (engine: {})", settings.current_model, settings.current_model_engine);
-            }
-        }
+        sync_running_sharing_server_to_model(&app, &settings.current_model, &settings.current_model_engine).await?;
 
         // Emit model-changed event so frontend can refresh remote server status
         if let Err(e) = app.emit(
@@ -816,6 +850,11 @@ pub async fn set_model_from_tray(app: AppHandle, model_name: String) -> Result<(
             }
         }
 
+        let refreshed_connection = crate::commands::remote::refresh_saved_connection_status(&app, connection_id).await?;
+        if matches!(refreshed_connection.status, ConnectionStatus::SelfConnection) {
+            return Err("Cannot use this VoiceTypr instance as its own remote server".to_string());
+        }
+
         // Stop network sharing if enabled (can't share while using remote)
         // and remember that it was active for auto-restore later
         if let Some(server_manager) = app.try_state::<AsyncMutex<RemoteServerManager>>() {
@@ -909,25 +948,22 @@ pub async fn set_model_from_tray(app: AppHandle, model_name: String) -> Result<(
                 }
             };
 
-            let (model_path, engine) = match resolve_shareable_model_config(&app, &model_name, &engine).await {
-                Ok(config) => config,
-                Err(e) => {
-                    log::warn!("🔧 [TRAY] Skipping auto-restore of network sharing: {}", e);
-                    return Ok(());
+            if let Ok((model_path, engine)) = resolve_shareable_model_config(&app, &model_name, &engine).await {
+                let mut manager = server_manager.lock().await;
+                if let Err(e) = manager.start(restore_port, restore_password, server_name, model_path, model_name.clone(), engine, Some(app.clone())).await {
+                    log::warn!("🔧 [TRAY] Failed to auto-restore sharing: {}", e);
+                } else {
+                    {
+                        let remote_state = app.state::<AsyncMutex<RemoteSettings>>();
+                        let mut settings = remote_state.lock().await;
+                        settings.sharing_was_active = false;
+                        save_remote_settings(&app, &settings)?;
+                    }
+                    let _ = app.emit("sharing-status-changed", json!({ "refresh": true }));
+                    log::info!("🔧 [TRAY] Network sharing auto-restored successfully");
                 }
-            };
-
-            let mut manager = server_manager.lock().await;
-            if let Err(e) = manager.start(restore_port, restore_password, server_name, model_path, model_name.clone(), engine, Some(app.clone())).await {
-                log::warn!("🔧 [TRAY] Failed to auto-restore sharing: {}", e);
             } else {
-                {
-                    let remote_state = app.state::<AsyncMutex<RemoteSettings>>();
-                    let mut settings = remote_state.lock().await;
-                    settings.sharing_was_active = false;
-                    save_remote_settings(&app, &settings)?;
-                }
-                log::info!("🔧 [TRAY] Network sharing auto-restored successfully");
+                log::warn!("🔧 [TRAY] Skipping auto-restore of network sharing: selected model '{}' is not shareable", model_name);
             }
         }
     }
@@ -972,26 +1008,8 @@ pub async fn set_model_from_tray(app: AppHandle, model_name: String) -> Result<(
     // Save settings (this will also preload the model)
     save_settings(app.clone(), settings).await?;
 
-    // Update the sharing server's model if it's running
-    {
-        let server_manager = app.state::<AsyncMutex<RemoteServerManager>>();
-        let mut server = server_manager.lock().await;
-        if server.is_running() {
-            // Get the model path based on engine type
-            let model_path: std::path::PathBuf = if engine == "whisper" {
-                let whisper_state = app.state::<tauri::async_runtime::RwLock<WhisperManager>>();
-                let manager = whisper_state.read().await;
-                manager.get_model_path(&model_name).unwrap_or_default()
-            } else {
-                // For non-whisper engines (parakeet, soniox), model path is handled differently
-                // Parakeet uses a sidecar, soniox uses cloud API
-                std::path::PathBuf::new()
-            };
-
-            // Update the shared state - this takes effect immediately for new requests
-            server.update_model(model_path, model_name.clone(), engine.clone());
-        }
-    }
+    // Keep a running sharing server truthful after the selected model changes
+    sync_running_sharing_server_to_model(&app, &model_name, &engine).await?;
 
     // Update the tray menu to reflect the new selection
     update_tray_menu(app.clone()).await?;

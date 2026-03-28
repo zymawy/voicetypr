@@ -10,7 +10,6 @@ import { TabContainer } from "./tabs/TabContainer";
 import { useReadiness } from "@/contexts/ReadinessContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { useEventCoordinator } from "@/hooks/useEventCoordinator";
-import { useModelAvailability } from '@/hooks/useModelAvailability';
 import { useModelManagementContext } from "@/contexts/ModelManagementContext";
 import { updateService } from "@/services/updateService";
 import { loadApiKeysToCache } from "@/utils/keyring";
@@ -34,7 +33,6 @@ export function AppContainer() {
   const { settings, refreshSettings } = useSettings();
   const { checkAccessibilityPermission, checkMicrophonePermission } = useReadiness();
 
-  const { hasModels, isChecking: isCheckingModelAvailability } = useModelAvailability();
   // Use the model management context for onboarding
   const modelManagement = useModelManagementContext();
 
@@ -200,8 +198,7 @@ export function AppContainer() {
   }, [registerEvent]);
 
   const showOnboarding = Boolean(
-    forceShowOnboarding ||
-    (!settings?.onboarding_completed && hasModels === false && !isCheckingModelAvailability)
+    forceShowOnboarding || settings?.onboarding_completed === false
   );
 
 

@@ -26,7 +26,7 @@ export function AudioUploadSection() {
   const [isDragging, setIsDragging] = useState(false);
   const [activeRemoteServer, setActiveRemoteServer] = useState<string | null>(null);
   const { settings } = useSettings();
-  const { selectedModelAvailable, remoteSelected, remoteAvailable } = useModelAvailability();
+  const { selectedModelAvailable, remoteAvailable } = useModelAvailability();
   const {
     selectedFile,
     status,
@@ -41,9 +41,10 @@ export function AudioUploadSection() {
   const effectiveFileName = selectedFile?.name || null;
   const hasEffectiveSelection = !!selectedFile;
 
-  const resolveHistoryModelName = async () => {
-    if (!activeRemoteServer) {
-      return settings?.current_model || '';
+  const resolveHistoryModelName = async (remoteServerIdOverride?: string | null) => {
+    const effectiveRemoteId = remoteServerIdOverride ?? activeRemoteServer;
+    if (!effectiveRemoteId) {
+      return settings?.current_model_engine === 'soniox' ? 'Soniox (Cloud)' : (settings?.current_model || '');
     }
 
     try {
@@ -54,20 +55,20 @@ export function AudioUploadSection() {
         port: number;
       }>>('list_remote_servers');
       if (!Array.isArray(servers)) {
-        return `Remote: ${activeRemoteServer}`;
+        return `Remote: ${effectiveRemoteId}`;
       }
 
-      const activeServer = servers.find((server) => server.id === activeRemoteServer);
+      const activeServer = servers.find((server) => server.id === effectiveRemoteId);
 
       if (!activeServer) {
-        return `Remote: ${activeRemoteServer}`;
+        return `Remote: ${effectiveRemoteId}`;
       }
 
       const displayName = activeServer.name || `${activeServer.host}:${activeServer.port}`;
       return `Remote: ${displayName}`;
     } catch (error) {
       console.error('Failed to resolve active remote server name:', error);
-      return `Remote: ${activeRemoteServer}`;
+      return `Remote: ${effectiveRemoteId}`;
     }
   };
 
@@ -120,17 +121,24 @@ export function AudioUploadSection() {
       return;
     }
 
-    if (remoteSelected && !remoteAvailable) {
+    const latestActiveRemoteServer = await invoke<string | null>('get_active_remote_server')
+      .catch(() => activeRemoteServer);
+    const latestAvailability = await invoke<{ remote_available?: boolean } | null>('get_recognition_availability_snapshot')
+      .catch(() => null);
+    const effectiveRemoteSelected = !!latestActiveRemoteServer;
+    const effectiveRemoteAvailable = latestAvailability?.remote_available ?? remoteAvailable;
+
+    if (effectiveRemoteSelected && !effectiveRemoteAvailable) {
       toast.error('Selected remote unavailable. Reconnect or choose another source.');
       return;
     }
 
-    if (!settings?.current_model && !remoteAvailable) {
+    if (!settings?.current_model && !effectiveRemoteAvailable) {
       toast.error('Select a speech model in Models before transcribing.');
       return;
     }
 
-    if (!remoteSelected && selectedModelAvailable === false) {
+    if (!effectiveRemoteSelected && selectedModelAvailable === false) {
       const engine = settings?.current_model_engine || 'whisper';
       toast.error(
         engine === 'soniox'
@@ -147,8 +155,8 @@ export function AudioUploadSection() {
 
     const result = await start(
       settings?.current_model || '',
-      settings?.current_model_engine || 'whisper',
-      await resolveHistoryModelName()
+      effectiveRemoteSelected ? null : (settings?.current_model_engine || 'whisper'),
+      await resolveHistoryModelName(latestActiveRemoteServer)
     );
 
     try {

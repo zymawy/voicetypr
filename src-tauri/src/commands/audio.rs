@@ -159,7 +159,7 @@ impl Drop for NormalizedTempFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{recording_license_state, should_hide_pill_when_idle, NormalizedTempFile, RecordingLicenseState};
+    use super::{recording_license_state, should_hide_pill_when_idle, should_use_active_remote, NormalizedTempFile, RecordingLicenseState};
     use crate::commands::license::CachedLicense;
     use crate::license::{LicenseState, LicenseStatus};
     use std::fs;
@@ -228,6 +228,18 @@ mod tests {
         }
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn explicit_engine_hint_bypasses_active_remote() {
+        assert!(!should_use_active_remote(Some("whisper")));
+        assert!(!should_use_active_remote(Some("parakeet")));
+        assert!(!should_use_active_remote(Some("soniox")));
+    }
+
+    #[test]
+    fn missing_engine_hint_allows_active_remote() {
+        assert!(should_use_active_remote(None));
     }
 }
 
@@ -689,6 +701,11 @@ async fn abort_due_to_missing_model(
     Err(log_message.to_string())
 }
 
+fn should_use_active_remote(engine_hint: Option<&str>) -> bool {
+    engine_hint.is_none()
+}
+
+
 async fn resolve_engine_for_model(
     app: &AppHandle,
     model_name: &str,
@@ -700,14 +717,16 @@ async fn resolve_engine_for_model(
         settings.get_active_connection().cloned()
     };
 
-    if let Some(remote_conn) = active_remote {
-        return Ok(ActiveEngineSelection::Remote {
-            server_id: remote_conn.id.clone(),
-            server_name: remote_conn.display_name(),
-            host: remote_conn.host,
-            port: remote_conn.port,
-            password: remote_conn.password,
-        });
+    if should_use_active_remote(engine_hint) {
+        if let Some(remote_conn) = active_remote {
+            return Ok(ActiveEngineSelection::Remote {
+                server_id: remote_conn.id.clone(),
+                server_name: remote_conn.display_name(),
+                host: remote_conn.host,
+                port: remote_conn.port,
+                password: remote_conn.password,
+            });
+        }
     }
 
     let whisper_state = app.state::<AsyncRwLock<WhisperManager>>();
@@ -2247,15 +2266,11 @@ pub async fn stop_recording(
         // On recoverable failure (remote server errors): always save to preserve for re-transcription
         let recording_file = match &transcription_result {
             Ok(_) => maybe_save_recording(&app_for_task, &audio_path_clone).await,
-            Err(e) => {
-                // For remote server errors, always preserve the recording for re-transcription
-                if e.contains("remote server") || e.contains("Remote server") || e.contains("Connection refused") {
-                    log::info!("Preserving recording for failed remote transcription");
-                    save_recording(&app_for_task, &audio_path_clone).await
-                } else {
-                    None
-                }
+            Err(_) if matches!(engine_selection_for_task, ActiveEngineSelection::Remote { .. }) => {
+                log::info!("Preserving recording for failed remote transcription");
+                save_recording(&app_for_task, &audio_path_clone).await
             }
+            Err(_) => None,
         };
 
         // Clean up temp file regardless of outcome

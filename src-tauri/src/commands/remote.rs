@@ -517,26 +517,21 @@ pub async fn test_remote_server(
 /// Check the status of a single remote server
 /// Called by frontend for each server in parallel for immediate UI updates
 #[tauri::command]
-pub async fn check_remote_server_status(
-    app: AppHandle,
-    server_id: String,
-    remote_settings: State<'_, AsyncMutex<RemoteSettings>>,
+pub(crate) async fn refresh_saved_connection_status(
+    app: &AppHandle,
+    server_id: &str,
 ) -> Result<SavedConnection, String> {
-    log::debug!("🔄 [REMOTE] check_remote_server_status called for {}", server_id);
-
-    // Get local machine ID for self-connection detection
+    let remote_settings = app.state::<AsyncMutex<RemoteSettings>>();
     let local_machine_id = get_local_machine_id().ok();
 
-    // Get the server to check
     let server = {
         let settings = remote_settings.lock().await;
         settings
-            .get_connection(&server_id)
+            .get_connection(server_id)
             .cloned()
             .ok_or_else(|| format!("Server '{}' not found", server_id))?
     };
 
-    // Check the server status
     let check_result = test_connection(
         &server.host,
         server.port,
@@ -546,7 +541,6 @@ pub async fn check_remote_server_status(
 
     let (new_status, new_model) = match check_result {
         Ok(status_response) => {
-            // Check for self-connection
             if is_self_connection(local_machine_id.as_deref(), &status_response.machine_id) {
                 (ConnectionStatus::SelfConnection, Some(status_response.model))
             } else {
@@ -562,12 +556,10 @@ pub async fn check_remote_server_status(
         }
     };
 
-    // Update the cached status and return the updated server
     let updated_server = {
         let mut settings = remote_settings.lock().await;
-        settings.update_connection_status(&server_id, new_status.clone(), new_model.clone());
-        // Save settings (best effort - don't fail the whole operation)
-        if let Err(e) = save_remote_settings(&app, &settings) {
+        settings.update_connection_status(server_id, new_status.clone(), new_model.clone());
+        if let Err(e) = save_remote_settings(app, &settings) {
             log::warn!("Failed to save remote settings: {}", e);
         }
 
@@ -589,6 +581,16 @@ pub async fn check_remote_server_status(
 
     log::debug!("🔄 [REMOTE] Server {} status: {:?}", server_id, new_status);
     Ok(updated_server)
+}
+
+#[tauri::command]
+pub async fn check_remote_server_status(
+    app: AppHandle,
+    server_id: String,
+    _remote_settings: State<'_, AsyncMutex<RemoteSettings>>,
+) -> Result<SavedConnection, String> {
+    log::debug!("🔄 [REMOTE] check_remote_server_status called for {}", server_id);
+    refresh_saved_connection_status(&app, &server_id).await
 }
 
 /// Refresh the status of all remote servers (legacy - returns list without checking)
@@ -623,11 +625,16 @@ pub async fn set_active_remote_server(
     let mut restore_port: Option<u16> = None;
     let mut restore_password: Option<String> = None;
 
-    // If selecting a remote server, validate it first and stop sharing if needed
+    // If selecting a remote server, validate it first and refresh its status before side effects
     if let Some(id) = &server_id {
         {
             let settings = remote_settings.lock().await;
             ensure_remote_selection_is_allowed(&settings, id)?;
+        }
+
+        let refreshed_server = refresh_saved_connection_status(&app, id).await?;
+        if matches!(refreshed_server.status, ConnectionStatus::SelfConnection) {
+            return Err("Cannot use this VoiceTypr instance as its own remote server".to_string());
         }
 
         log::info!("⏱️ [TIMING] Acquiring server_manager lock... (+{}ms)", cmd_start.elapsed().as_millis());
@@ -671,16 +678,8 @@ pub async fn set_active_remote_server(
         log::info!("⏱️ [TIMING] remote_settings lock acquired (+{}ms)", cmd_start.elapsed().as_millis());
         if settings.sharing_was_active {
             should_restore_sharing = true;
-            // Get stored sharing settings from app settings
-            if let Ok(store) = app.store("settings") {
-                restore_port = store
-                    .get("sharing_port")
-                    .and_then(|v| v.as_u64())
-                    .map(|p| p as u16);
-                restore_password = store
-                    .get("sharing_password")
-                    .and_then(|v| v.as_str().map(|s| s.to_string()));
-            }
+            restore_port = Some(settings.server_config.port);
+            restore_password = settings.server_config.password.clone();
             log::info!("⏱️ [TIMING] Will restore sharing (sharing_was_active=true) (+{}ms)", cmd_start.elapsed().as_millis());
         }
     }
@@ -741,18 +740,27 @@ pub async fn set_active_remote_server(
         };
 
         // Normalize empty model to first available (matching start_sharing behavior)
-        let current_model = if current_model.is_empty() {
+        let Some(current_model) = (if current_model.is_empty() {
             let whisper_manager = app.state::<tauri::async_runtime::RwLock<crate::whisper::manager::WhisperManager>>();
             let manager = whisper_manager.read().await;
-            match manager.get_first_downloaded_model() {
-                Some(model) => model,
-                None => {
-                    log::warn!("⏱️ [TIMING] Skipping sharing restore: no downloaded models available");
-                    return Ok(());
-                }
-            }
+            manager.get_first_downloaded_model()
         } else {
-            current_model
+            Some(current_model)
+        }) else {
+            log::warn!("⏱️ [TIMING] Skipping sharing restore: no downloaded models available");
+            should_restore_sharing = false;
+            let manager = server_manager.lock().await;
+            let status = manager.get_status();
+            let _ = app.emit(
+                "sharing-status-changed",
+                serde_json::json!({
+                    "enabled": status.enabled,
+                    "port": status.port,
+                    "model_name": status.model_name
+                }),
+            );
+            let _ = crate::commands::settings::update_tray_menu(app.clone()).await;
+            return Ok(());
         };
 
         log::info!("⏱️ [TIMING] Got model={}, engine={} (+{}ms)", current_model, current_engine, cmd_start.elapsed().as_millis());
@@ -760,7 +768,6 @@ pub async fn set_active_remote_server(
             .ok()
             .and_then(|h| h.into_string().ok())
             .unwrap_or_else(|| "VoiceTypr Server".to_string());
-
 
         log::info!("⏱️ [TIMING] Getting model path... (+{}ms)", cmd_start.elapsed().as_millis());
         let (model_path, current_engine) = match resolve_shareable_model_config(
@@ -773,6 +780,18 @@ pub async fn set_active_remote_server(
             Ok(config) => config,
             Err(e) => {
                 log::warn!("⏱️ [TIMING] Skipping sharing restore: {}", e);
+                should_restore_sharing = false;
+                let manager = server_manager.lock().await;
+                let status = manager.get_status();
+                let _ = app.emit(
+                    "sharing-status-changed",
+                    serde_json::json!({
+                        "enabled": status.enabled,
+                        "port": status.port,
+                        "model_name": status.model_name
+                    }),
+                );
+                let _ = crate::commands::settings::update_tray_menu(app.clone()).await;
                 return Ok(());
             }
         };
@@ -1081,12 +1100,16 @@ pub fn load_remote_settings(app: &AppHandle) -> RemoteSettings {
         raw_value.is_some()
     );
 
-    let settings: RemoteSettings = raw_value
+    let mut settings: RemoteSettings = raw_value
         .and_then(|v| {
             log::debug!("🔧 [REMOTE] Raw JSON: {:?}", v);
             serde_json::from_value(v.clone()).ok()
         })
         .unwrap_or_default();
+
+    if let Some(active_id) = settings.active_connection_id.clone() {
+        settings.update_connection_status(&active_id, ConnectionStatus::Unknown, None);
+    }
 
     log::info!(
         "🔧 [REMOTE] Loaded settings: {} connections, active_id={:?}",

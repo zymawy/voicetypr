@@ -16,7 +16,7 @@ type UploadState = {
   error: string | null
   select: (path: string) => void
   clearSelection: () => void
-  start: (modelName: string, modelEngine: string, historyModelName?: string) => Promise<UploadResult | null>
+  start: (modelName: string, modelEngine: string | null, historyModelName?: string) => Promise<UploadResult | null>
   reset: () => void
 }
 
@@ -33,7 +33,7 @@ export const useUploadStore = create<UploadState>((set, get) => ({
 
   clearSelection: () => set({ selectedFile: null }),
 
-  start: async (modelName: string, modelEngine: string, historyModelName?: string) => {
+  start: async (modelName: string, modelEngine: string | null, historyModelName?: string) => {
     const { selectedFile, status } = get()
     if (!selectedFile) return null
     if (status === 'processing') return null
