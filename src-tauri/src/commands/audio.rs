@@ -719,13 +719,17 @@ async fn resolve_engine_for_model(
 
     if should_use_active_remote(engine_hint) {
         if let Some(remote_conn) = active_remote {
-            return Ok(ActiveEngineSelection::Remote {
-                server_id: remote_conn.id.clone(),
-                server_name: remote_conn.display_name(),
-                host: remote_conn.host,
-                port: remote_conn.port,
-                password: remote_conn.password,
-            });
+            if matches!(remote_conn.status, crate::remote::settings::ConnectionStatus::Online) {
+                return Ok(ActiveEngineSelection::Remote {
+                    server_id: remote_conn.id.clone(),
+                    server_name: remote_conn.display_name(),
+                    host: remote_conn.host,
+                    port: remote_conn.port,
+                    password: remote_conn.password,
+                });
+            }
+
+            return Err("Selected remote unavailable. Reconnect or choose another source.".to_string());
         }
     }
 
@@ -922,30 +926,38 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
     let availability = crate::recognition_availability_snapshot(app).await;
     log::info!("⏱️ [VALIDATE] recognition_availability_snapshot complete (+{}ms)", validate_start.elapsed().as_millis());
 
-    if !availability.any_available() {
-        log::error!("No speech recognition engines are ready");
-        // Emit error event with guidance
+    if !availability.any_available() || (availability.remote_selected && !availability.remote_available) {
+        log::error!("No usable speech recognition engines are ready");
+        let (title, message, error_text) = if availability.remote_selected && !availability.remote_available {
+            (
+                "Selected Remote Unavailable",
+                "Selected remote unavailable. Reconnect or choose another source.",
+                "Selected remote unavailable. Reconnect or choose another source.".to_string(),
+            )
+        } else if availability.soniox_selected && !availability.soniox_ready {
+            (
+                "No Speech Recognition Sources",
+                "Please configure your Soniox token in Models before recording.",
+                "Soniox token missing".to_string(),
+            )
+        } else {
+            (
+                "No Speech Recognition Sources",
+                "Connect a cloud provider or download a local model in Models before recording.",
+                "No speech recognition sources available. Please configure a source first.".to_string(),
+            )
+        };
         let _ = emit_to_window(
             app,
             "main",
             "no-models-error",
             serde_json::json!({
-                "title": "No Speech Recognition Models",
-                "message": if availability.soniox_selected && !availability.soniox_ready {
-                    "Please configure your Soniox token in Models before recording."
-                } else {
-                    "Please download at least one model from Models before recording."
-                },
+                "title": title,
+                "message": message,
                 "action": "open-settings"
             }),
         );
-        return Err(
-            if availability.soniox_selected && !availability.soniox_ready {
-                "Soniox token missing".to_string()
-            } else {
-                "No speech recognition models installed. Please download a model first.".to_string()
-            },
-        );
+        return Err(error_text);
     }
 
     // Check cached license status (warmed during startup/license transitions - no network call)
@@ -1675,18 +1687,28 @@ pub async fn stop_recording(
     log::info!("🔍 [REMOTE DEBUG] active_remote is_some={}", active_remote.is_some());
 
     let engine_selection = if let Some(remote_conn) = active_remote {
-        log::info!(
-            "🌐 Using remote server for transcription: {} ({}:{})",
-            remote_conn.display_name(),
-            remote_conn.host,
-            remote_conn.port
-        );
-        ActiveEngineSelection::Remote {
-            server_id: remote_conn.id.clone(),
-            server_name: remote_conn.display_name(),
-            host: remote_conn.host,
-            port: remote_conn.port,
-            password: remote_conn.password,
+        if matches!(remote_conn.status, crate::remote::settings::ConnectionStatus::Online) {
+            log::info!(
+                "🌐 Using remote server for transcription: {} ({}:{})",
+                remote_conn.display_name(),
+                remote_conn.host,
+                remote_conn.port
+            );
+            ActiveEngineSelection::Remote {
+                server_id: remote_conn.id.clone(),
+                server_name: remote_conn.display_name(),
+                host: remote_conn.host,
+                port: remote_conn.port,
+                password: remote_conn.password,
+            }
+        } else {
+            return abort_due_to_missing_model(
+                &app,
+                &audio_path,
+                "Selected remote unavailable",
+                "Selected remote unavailable. Reconnect or choose another source.",
+            )
+            .await;
         }
     } else {
         match config.current_engine.as_str() {

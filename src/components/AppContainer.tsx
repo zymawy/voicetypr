@@ -43,12 +43,6 @@ export function AppContainer() {
   useEffect(() => {
     let cancelled = false;
 
-    const handleNoModels = () => {
-      console.log("No models available - redirecting to onboarding");
-      setForceShowOnboarding(true);
-    };
-
-    window.addEventListener("no-models-available", handleNoModels);
 
     const timeoutId = window.setTimeout(() => {
       if (cancelled) return;
@@ -80,7 +74,6 @@ export function AppContainer() {
     return () => {
       cancelled = true;
       clearTimeout(timeoutId);
-      window.removeEventListener("no-models-available", handleNoModels);
       updateService.dispose();
     };
   }, [settings]);
@@ -173,6 +166,7 @@ export function AppContainer() {
 
         await register<ErrorEventPayload>("no-models-error", (data) => {
           console.error("No models available:", data);
+          setForceShowOnboarding(true);
           toast.error(data.title || 'No Models Available', {
             description:
               data.message ||
@@ -196,6 +190,44 @@ export function AppContainer() {
       });
     };
   }, [registerEvent]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const syncStartupOnboardingTruth = async () => {
+      if (!settings?.onboarding_completed) return;
+
+      try {
+        const availability = await invoke<{
+          whisper_available: boolean;
+          parakeet_available: boolean;
+          soniox_selected: boolean;
+          soniox_ready: boolean;
+          remote_selected: boolean;
+          remote_available: boolean;
+        }>('get_recognition_availability_snapshot');
+
+        const hasTrueNoSource =
+          !availability.whisper_available &&
+          !availability.parakeet_available &&
+          !(availability.soniox_selected && availability.soniox_ready) &&
+          !availability.remote_available;
+
+        if (!cancelled && hasTrueNoSource) {
+          setForceShowOnboarding(true);
+        }
+      } catch (error) {
+        console.error('Failed to sync startup onboarding truth:', error);
+      }
+    };
+
+    void syncStartupOnboardingTruth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settings?.onboarding_completed]);
+
 
   const showOnboarding = Boolean(
     forceShowOnboarding || settings?.onboarding_completed === false

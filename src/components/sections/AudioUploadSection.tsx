@@ -244,7 +244,7 @@ export function AudioUploadSection() {
           <div>
             <h1 className="text-2xl font-semibold">Upload files</h1>
             <p className="text-sm text-muted-foreground mt-1">
-              Transcribe audio or video files locally
+              Transcribe audio or video files using your selected transcription source
             </p>
           </div>
         </div>
@@ -410,7 +410,7 @@ export function AudioUploadSection() {
                     <p>• <strong>Supported Formats:</strong> WAV, MP3, M4A, FLAC, OGG, MP4, WebM</p>
                     <p>• <strong>Conversion:</strong> Non-WAV files will be converted to 16 kHz mono WAV before transcription; this may take time</p>
                     <p>• <strong>Video:</strong> Video files are supported; audio is extracted first</p>
-                    <p>• <strong>Processing:</strong> Happens locally on your device</p>
+                    <p>• <strong>Processing:</strong> Uses your selected local, cloud, or remote transcription source</p>
                     <p>• <strong>Duration:</strong> Longer media may take longer and use more memory</p>
                     <p className="text-amber-600 font-medium mt-2">
                       ⚠️ Long media (4-5+ hours) may take several minutes and use significant memory
