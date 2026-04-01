@@ -74,7 +74,7 @@ use commands::{
     remote::{
         add_remote_server, check_remote_server_status, get_active_remote_server,
         get_firewall_status, get_local_ips, get_local_machine_id, get_sharing_status,
-        list_remote_servers, open_firewall_settings, refresh_remote_servers, remove_remote_server,
+        list_remote_servers, open_firewall_settings, refresh_active_remote_server_status, refresh_remote_servers, remove_remote_server,
         set_active_remote_server, start_sharing, stop_sharing, test_remote_connection,
         test_remote_server, transcribe_remote, update_remote_server,
     },
@@ -1134,12 +1134,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Hide main window on start (menu bar only)
-            // Check if this is first launch by looking for current_model setting
+            // Only a configured local/cloud model hides the main window immediately.
+            // Remote-only sessions stay visible until startup checks verify the remote is available.
             let should_hide_main = if let Ok(store) = app.store("settings") {
-                // If user has a model configured, they've completed onboarding
-                store.get("current_model")
+                let has_local_or_cloud_model = store
+                    .get("current_model")
                     .and_then(|v| v.as_str().map(|s| !s.is_empty()))
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+
+                has_local_or_cloud_model && active_id.is_none()
             } else {
                 false
             };
@@ -1153,7 +1156,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 #[cfg(target_os = "macos")]
                 hide_dock_icon(app.app_handle());
             } else {
-                log::info!("👋 First launch or no model configured - keeping main window visible");
+                log::info!("👋 First launch or no source configured - keeping main window visible");
                 // Show dock icon when main window is visible
                 #[cfg(target_os = "macos")]
                 show_dock_icon(app.app_handle());
@@ -1252,6 +1255,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             open_logs_folder,
             get_device_id,
             // Remote transcription commands
+            refresh_active_remote_server_status,
             get_recognition_availability_snapshot,
             start_sharing,
             stop_sharing,
@@ -1333,18 +1337,18 @@ async fn perform_startup_checks(app: tauri::AppHandle) {
     }
 
     if let Some(remote_settings) = app.try_state::<AsyncMutex<crate::remote::settings::RemoteSettings>>() {
-        let active_remote_id = {
-            let settings = remote_settings.lock().await;
-            settings.active_connection_id.clone()
-        };
-        if let Some(active_remote_id) = active_remote_id {
-            if let Err(err) = crate::commands::remote::refresh_saved_connection_status(&app, &active_remote_id).await {
-                log::warn!("Failed to refresh active remote status during startup checks: {}", err);
-            }
+        if let Err(err) = crate::commands::remote::refresh_active_remote_server_status_impl(
+            &app,
+            &*remote_settings,
+        )
+        .await
+        {
+            log::warn!("Failed to refresh active remote status during startup checks: {}", err);
         }
     }
 
-    let availability = recognition_availability_snapshot(&app).await;
+    let availability = crate::recognition::emit_recognition_availability(&app).await;
+
     log_model_operation(
         "AVAILABILITY_CHECK",
         "all",
@@ -1356,22 +1360,39 @@ async fn perform_startup_checks(app: tauri::AppHandle) {
         None,
     );
 
-    if let Err(err) = app.emit("recognition-availability", availability.clone()) {
-        log::warn!("Failed to emit recognition availability event: {}", err);
-    }
-
     if availability.any_available() {
         if let Err(e) = auto_select_model_if_needed(&app, &availability).await {
             log::warn!("Failed to auto-select default model: {}", e);
+        }
+        if availability.remote_available {
+            let onboarding_completed = app
+                .store("settings")
+                .ok()
+                .and_then(|store| store.get("onboarding_completed").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+
+            if onboarding_completed {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+                #[cfg(target_os = "macos")]
+                hide_dock_icon(&app);
+            }
         }
     }
 
     if !availability.any_available() {
         log::warn!("⚠️  No speech recognition engines are ready");
         let _ = app.emit("no-models-on-startup", ());
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+        }
+        #[cfg(target_os = "macos")]
+        show_dock_icon(&app);
     } else {
         log::info!("✅ At least one speech recognition engine is ready");
     }
+
 
     // Validate AI settings if enabled
     if let Ok(store) = app.store("settings") {

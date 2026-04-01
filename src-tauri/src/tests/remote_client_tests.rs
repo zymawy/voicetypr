@@ -4,7 +4,7 @@
 //! other VoiceTypr instances for remote transcription.
 
 use crate::remote::client::{
-    RemoteServerConnection, TranscriptionRequest, TranscriptionSource, calculate_timeout_ms,
+    RemoteServerConnection, TranscriptionRequest, TranscriptionSource, calculate_timeout_ms, timeout_ms_for_wav_file,
 };
 
 /// Test timeout calculation for live recordings (30 seconds)
@@ -63,6 +63,21 @@ fn test_timeout_calculation_minimum() {
     let timeout = calculate_timeout_ms(1_000, TranscriptionSource::LiveRecording);
     // 30_000 + 2 * 1_000 = 32_000ms
     assert_eq!(timeout, 32_000);
+}
+
+/// Test unreadable WAV files fall back to the source base timeout
+#[test]
+fn test_timeout_for_missing_wav_file_falls_back_to_source_base() {
+    let missing_path = "/definitely/missing/audio.wav";
+
+    assert_eq!(
+        timeout_ms_for_wav_file(missing_path, TranscriptionSource::LiveRecording),
+        calculate_timeout_ms(0, TranscriptionSource::LiveRecording)
+    );
+    assert_eq!(
+        timeout_ms_for_wav_file(missing_path, TranscriptionSource::Upload),
+        calculate_timeout_ms(0, TranscriptionSource::Upload)
+    );
 }
 
 /// Test remote server connection creation
@@ -454,4 +469,54 @@ fn test_url_format_validity() {
     // All URLs should contain the port
     assert!(status_url.contains("8443"));
     assert!(transcribe_url.contains("8443"));
+}
+
+
+use crate::remote::client::{RemoteClientError, RemoteEndpoint};
+use reqwest::StatusCode;
+
+#[test]
+fn test_remote_client_error_classifies_auth_and_timeout() {
+    let auth_error = RemoteClientError::AuthFailed {
+        endpoint: RemoteEndpoint::Status,
+        body: Some("{\"error\":\"Authentication failed\"}".to_string()),
+    };
+    assert!(auth_error.is_auth_failure());
+    assert!(!auth_error.is_timeout());
+    assert_eq!(auth_error.endpoint(), RemoteEndpoint::Status);
+
+    let timeout_error = RemoteClientError::Timeout {
+        endpoint: RemoteEndpoint::Transcribe,
+        timeout_ms: 12_000,
+        detail: "request timed out".to_string(),
+    };
+    assert!(timeout_error.is_timeout());
+    assert!(!timeout_error.is_auth_failure());
+    assert_eq!(timeout_error.endpoint(), RemoteEndpoint::Transcribe);
+}
+
+#[test]
+fn test_remote_client_error_preserves_http_details_and_splits_response_failures() {
+    let http_error = RemoteClientError::HttpStatus {
+        endpoint: RemoteEndpoint::Transcribe,
+        status: StatusCode::BAD_GATEWAY,
+        body: Some("upstream unavailable".to_string()),
+    };
+    assert_eq!(http_error.status_code(), Some(StatusCode::BAD_GATEWAY));
+    assert_eq!(http_error.server_error_body(), Some("upstream unavailable"));
+
+    let decode_error = RemoteClientError::ResponseDecode {
+        endpoint: RemoteEndpoint::Status,
+        detail: "invalid JSON".to_string(),
+        body: Some("not-json".to_string()),
+    };
+    let schema_error = RemoteClientError::ResponseSchema {
+        endpoint: RemoteEndpoint::Status,
+        detail: "missing field 'model'".to_string(),
+        body: Some("{\"status\":\"ok\"}".to_string()),
+    };
+
+    assert_eq!(decode_error.endpoint(), RemoteEndpoint::Status);
+    assert_eq!(schema_error.endpoint(), RemoteEndpoint::Status);
+    assert_ne!(format!("{}", decode_error), format!("{}", schema_error));
 }

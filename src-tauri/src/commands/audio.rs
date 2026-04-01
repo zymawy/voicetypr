@@ -10,7 +10,7 @@ use crate::parakeet::ParakeetManager;
 use crate::utils::logger::*;
 #[cfg(debug_assertions)]
 use crate::utils::system_monitor;
-use crate::remote::client::RemoteServerConnection;
+use crate::remote::client::{self, timeout_ms_for_wav_file, RemoteClientError, RemoteServerConnection, TranscriptionRequest, TranscriptionSource};
 use crate::remote::settings::RemoteSettings;
 use crate::whisper::cache::TranscriberCache;
 use crate::whisper::languages::validate_language;
@@ -18,6 +18,7 @@ use crate::whisper::manager::WhisperManager;
 use crate::{emit_to_window, update_recording_state, AppState, RecordingMode, RecordingState};
 use cpal::traits::{DeviceTrait, HostTrait};
 use once_cell::sync::Lazy;
+use uuid::Uuid;
 use serde_json;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::path::{Path, PathBuf};
@@ -157,12 +158,311 @@ impl Drop for NormalizedTempFile {
     }
 }
 
+const RETRANSCRIPTION_SESSION_MARKER_FIELD: &str = "retranscription_session_marker";
+
+const RETRANSCRIPTION_FAILURE_DETAIL_FIELD: &str = "failure_detail";
+
+const STALE_RETRANSCRIPTION_FAILURE_TEXT: &str =
+    "Retranscription interrupted before completion";
+
+static RETRANSCRIPTION_SESSION_MARKER: Lazy<Uuid> = Lazy::new(Uuid::new_v4);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionStatus {
+    InProgress,
+    Completed,
+    Failed,
+}
+
+impl TranscriptionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "in_progress" => Some(Self::InProgress),
+            "completed" => Some(Self::Completed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+fn current_retranscription_session_marker() -> String {
+    RETRANSCRIPTION_SESSION_MARKER.to_string()
+}
+
+fn transcription_status_value(status: TranscriptionStatus) -> serde_json::Value {
+    serde_json::Value::String(status.as_str().to_string())
+}
+
+fn normalize_transcription_status(status: Option<TranscriptionStatus>) -> TranscriptionStatus {
+    status.unwrap_or(TranscriptionStatus::Completed)
+}
+
+fn parse_transcription_status(value: Option<&serde_json::Value>) -> Option<TranscriptionStatus> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .and_then(TranscriptionStatus::from_str)
+}
+
+fn should_replace_placeholder_text(text: Option<&str>) -> bool {
+    text.map(|text| text.is_empty() || text == "In progress...")
+        .unwrap_or(true)
+}
+
+fn apply_retranscription_status(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    status: Option<TranscriptionStatus>,
+) -> TranscriptionStatus {
+    let effective_status = normalize_transcription_status(status);
+    map.insert(
+        "status".to_string(),
+        transcription_status_value(effective_status),
+    );
+    map.insert("is_retranscription".to_string(), serde_json::Value::Bool(true));
+
+    match effective_status {
+        TranscriptionStatus::InProgress => {
+            map.insert(
+                RETRANSCRIPTION_SESSION_MARKER_FIELD.to_string(),
+                serde_json::Value::String(current_retranscription_session_marker()),
+            );
+        }
+        TranscriptionStatus::Completed | TranscriptionStatus::Failed => {
+            map.remove(RETRANSCRIPTION_SESSION_MARKER_FIELD);
+        }
+    }
+
+    effective_status
+}
+
+fn sync_retranscription_failure_metadata(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    status: TranscriptionStatus,
+    text: &str,
+ ) {
+    match status {
+        TranscriptionStatus::Completed | TranscriptionStatus::InProgress => {
+            map.remove("error_kind");
+            map.remove("error_detail");
+            map.remove("error_body");
+            map.remove("can_retry_from_history");
+        }
+        TranscriptionStatus::Failed => {
+            map.remove("error_kind");
+            map.remove("error_body");
+            map.insert(
+                "error_detail".to_string(),
+                serde_json::Value::String(text.to_string()),
+            );
+            if map.contains_key("recording_file") {
+                map.insert(
+                    "can_retry_from_history".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            } else {
+                map.remove("can_retry_from_history");
+            }
+        }
+    }
+}
+
+pub(crate) fn reconcile_transcription_history_entry(
+    entry: serde_json::Value,
+    current_session_marker: &str,
+) -> serde_json::Value {
+    let Some(original) = entry.as_object() else {
+        return entry;
+    };
+
+    let status = match original.get("status") {
+        Some(status_value) => parse_transcription_status(Some(status_value)),
+        None => None,
+    };
+
+    match status {
+        None => {
+            if original.contains_key("status") {
+                return entry;
+            }
+
+            let mut reconciled = entry.clone();
+            if let Some(map) = reconciled.as_object_mut() {
+                map.insert(
+                    "status".to_string(),
+                    transcription_status_value(TranscriptionStatus::Completed),
+                );
+                map.remove(RETRANSCRIPTION_SESSION_MARKER_FIELD);
+            }
+            reconciled
+        }
+        Some(TranscriptionStatus::InProgress) => {
+            let is_retranscription = original
+                .get("is_retranscription")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                || original
+                    .get("source_recording_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some();
+
+            if !is_retranscription {
+                return entry;
+            }
+
+            let stored_marker = original
+                .get(RETRANSCRIPTION_SESSION_MARKER_FIELD)
+                .and_then(serde_json::Value::as_str);
+
+            if stored_marker == Some(current_session_marker) {
+                return entry;
+            }
+
+            let mut reconciled = entry.clone();
+            if let Some(map) = reconciled.as_object_mut() {
+                if should_replace_placeholder_text(map.get("text").and_then(serde_json::Value::as_str)) {
+                    map.insert(
+                        "text".to_string(),
+                        serde_json::Value::String(
+                            STALE_RETRANSCRIPTION_FAILURE_TEXT.to_string(),
+                        ),
+                    );
+                }
+                map.insert(
+                    "status".to_string(),
+                    transcription_status_value(TranscriptionStatus::Failed),
+                );
+                map.remove(RETRANSCRIPTION_SESSION_MARKER_FIELD);
+                map.insert(
+                    RETRANSCRIPTION_FAILURE_DETAIL_FIELD.to_string(),
+                    serde_json::json!({
+                        "kind": "stale_retranscription_session",
+                        "current_session_marker": current_session_marker,
+                        "stale_session_marker": stored_marker,
+                    }),
+                );
+            }
+            reconciled
+        }
+        Some(TranscriptionStatus::Completed) | Some(TranscriptionStatus::Failed) => entry,
+    }
+}
+
+#[derive(Debug, Clone)]
+enum TranscriptionFailure {
+    Local(String),
+    Remote(RemoteClientError),
+}
+
+impl TranscriptionFailure {
+    fn message(&self) -> String {
+        match self {
+            Self::Local(message) => message.clone(),
+            Self::Remote(error) => error.to_string(),
+        }
+    }
+
+    fn error_kind(&self) -> &'static str {
+        match self {
+            Self::Local(_) => "local",
+            Self::Remote(error) => remote_client_error_kind(error),
+        }
+    }
+}
+
+fn remote_client_error_kind(error: &RemoteClientError) -> &'static str {
+    match error {
+        RemoteClientError::AuthFailed { .. } => "remote_auth_failed",
+        RemoteClientError::Timeout { .. } => "remote_timeout",
+        RemoteClientError::ConnectFailed { .. } => "remote_connect_failed",
+        RemoteClientError::HttpStatus { .. } => "remote_http_status",
+        RemoteClientError::ResponseDecode { .. } => "remote_response_decode",
+        RemoteClientError::ResponseSchema { .. } => "remote_response_schema",
+        RemoteClientError::RequestBuild { .. } => "remote_request_build",
+        RemoteClientError::JoinFailed { .. } => "remote_join_failed",
+    }
+}
+
+fn remote_server_error_pill_message(can_retry_from_history: bool) -> &'static str {
+    if can_retry_from_history {
+        "Remote transcription failed. Go to History to re-transcribe, or select a different model."
+    } else {
+        "Remote transcription failed. Check the remote server and try again."
+    }
+}
+
+fn build_remote_server_error_payload(
+    failure: &TranscriptionFailure,
+    can_retry_from_history: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "title": "Remote Transcription Failed",
+        "message": failure.message(),
+        "error_kind": failure.error_kind(),
+        "can_retry_from_history": can_retry_from_history,
+    })
+}
+
+fn build_failed_transcription_row(
+    error: &RemoteClientError,
+    model: &str,
+    recording_file: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "text": "Remote transcription failed - re-transcribe after resolving the issue",
+        "model": model,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "recording_file": recording_file,
+        "status": "failed",
+        "error_kind": remote_client_error_kind(error),
+        "error_detail": error.to_string(),
+        "error_body": error.server_error_body(),
+        "can_retry_from_history": true,
+    })
+}
+
+fn build_remote_upload_transcription_request(
+    audio_path: &Path,
+    audio_data: Vec<u8>,
+) -> (TranscriptionRequest, u64) {
+    let audio_path = audio_path.to_string_lossy();
+    let timeout_ms = timeout_ms_for_wav_file(audio_path.as_ref(), TranscriptionSource::Upload);
+
+    (
+        TranscriptionRequest::new(audio_data, TranscriptionSource::Upload),
+        timeout_ms,
+    )
+}
+
+
 #[cfg(test)]
 mod tests {
-    use super::{recording_license_state, should_hide_pill_when_idle, should_use_active_remote, NormalizedTempFile, RecordingLicenseState};
+    use super::{
+        build_failed_transcription_row,
+        build_remote_server_error_payload,
+        build_remote_upload_transcription_request,
+        recording_license_state,
+        remote_server_error_pill_message,
+        should_hide_pill_when_idle,
+        should_use_active_remote,
+        sync_retranscription_failure_metadata,
+        NormalizedTempFile,
+        RecordingLicenseState,
+        TranscriptionFailure,
+        TranscriptionStatus,
+    };
     use crate::commands::license::CachedLicense;
     use crate::license::{LicenseState, LicenseStatus};
     use std::fs;
+    use crate::remote::client::{calculate_timeout_ms, RemoteClientError, RemoteEndpoint, TranscriptionSource};
+    use reqwest::StatusCode;
 
     fn cached_license(status: LicenseState) -> CachedLicense {
         CachedLicense::new(LicenseStatus {
@@ -173,6 +473,76 @@ mod tests {
             expires_at: None,
         })
     }
+
+    #[test]
+    fn remote_upload_transcription_request_uses_upload_timeout_policy() {
+        let audio_path = std::path::Path::new("missing-remote-upload.wav");
+        let audio_data = vec![0x12, 0x34, 0x56];
+
+        let (request, timeout_ms) =
+            build_remote_upload_transcription_request(audio_path, audio_data.clone());
+
+        assert_eq!(request.audio_data, audio_data);
+        assert_eq!(request.source, TranscriptionSource::Upload);
+        assert_eq!(timeout_ms, calculate_timeout_ms(0, TranscriptionSource::Upload));
+    }
+
+    #[test]
+    fn remote_clipboard_transcription_request_uses_upload_timeout_policy() {
+        let audio_path = std::path::Path::new("missing-remote-clipboard.wav");
+        let audio_data = vec![0x9a, 0xbc, 0xde];
+
+        let (request, timeout_ms) =
+            build_remote_upload_transcription_request(audio_path, audio_data.clone());
+
+        assert_eq!(request.audio_data, audio_data);
+        assert_eq!(request.source, TranscriptionSource::Upload);
+        assert_eq!(timeout_ms, calculate_timeout_ms(0, TranscriptionSource::Upload));
+    }
+
+    #[test]
+    fn completed_retranscription_clears_stale_failure_metadata() {
+        let mut map = serde_json::Map::new();
+        map.insert("recording_file".to_string(), serde_json::Value::String("sample.wav".to_string()));
+        map.insert("error_kind".to_string(), serde_json::Value::String("remote_timeout".to_string()));
+        map.insert("error_detail".to_string(), serde_json::Value::String("timed out".to_string()));
+        map.insert("error_body".to_string(), serde_json::Value::String("body".to_string()));
+        map.insert("can_retry_from_history".to_string(), serde_json::Value::Bool(true));
+
+        sync_retranscription_failure_metadata(&mut map, TranscriptionStatus::Completed, "done");
+
+        assert!(!map.contains_key("error_kind"));
+        assert!(!map.contains_key("error_detail"));
+        assert!(!map.contains_key("error_body"));
+        assert!(!map.contains_key("can_retry_from_history"));
+    }
+
+    #[test]
+    fn failed_retranscription_rewrites_failure_metadata() {
+        let mut map = serde_json::Map::new();
+        map.insert("recording_file".to_string(), serde_json::Value::String("sample.wav".to_string()));
+        map.insert("error_kind".to_string(), serde_json::Value::String("remote_timeout".to_string()));
+        map.insert("error_detail".to_string(), serde_json::Value::String("timed out".to_string()));
+        map.insert("error_body".to_string(), serde_json::Value::String("body".to_string()));
+
+        sync_retranscription_failure_metadata(
+            &mut map,
+            TranscriptionStatus::Failed,
+            "Re-transcription failed: Error: remote offline",
+        );
+
+        assert!(!map.contains_key("error_kind"));
+        assert!(!map.contains_key("error_body"));
+        assert_eq!(
+            map.get("error_detail").and_then(serde_json::Value::as_str),
+            Some("Re-transcription failed: Error: remote offline")
+        );
+        assert_eq!(
+            map.get("can_retry_from_history").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
+
 
     #[test]
     fn should_hide_pill_when_idle_for_never() {
@@ -240,6 +610,61 @@ mod tests {
     #[test]
     fn missing_engine_hint_allows_active_remote() {
         assert!(should_use_active_remote(None));
+    }
+
+    #[test]
+    fn retryable_preserved_remote_failure_emits_history_capable_payload_and_copy() {
+        let failure = TranscriptionFailure::Remote(RemoteClientError::Timeout {
+            endpoint: RemoteEndpoint::Transcribe,
+            timeout_ms: 120_000,
+            detail: "timed out while waiting for response".to_string(),
+        });
+        let payload = build_remote_server_error_payload(&failure, true);
+
+        assert_eq!(payload["title"].as_str().unwrap(), "Remote Transcription Failed");
+        assert!(payload["message"].as_str().unwrap().contains("timed out"));
+        assert_eq!(payload["error_kind"].as_str().unwrap(), "remote_timeout");
+        assert!(payload["can_retry_from_history"].as_bool().unwrap());
+        assert!(remote_server_error_pill_message(true).contains("History"));
+    }
+
+    #[test]
+    fn non_retryable_no_recording_remote_failure_omits_history_guidance() {
+        let failure = TranscriptionFailure::Remote(RemoteClientError::ConnectFailed {
+            endpoint: RemoteEndpoint::Transcribe,
+            detail: "connection refused".to_string(),
+        });
+        let payload = build_remote_server_error_payload(&failure, false);
+
+        assert_eq!(payload["title"].as_str().unwrap(), "Remote Transcription Failed");
+        assert!(payload["message"].as_str().unwrap().contains("connection refused"));
+        assert_eq!(payload["error_kind"].as_str().unwrap(), "remote_connect_failed");
+        assert!(!payload["can_retry_from_history"].as_bool().unwrap());
+        assert!(!remote_server_error_pill_message(false).contains("History"));
+    }
+
+    #[test]
+    fn failed_history_row_content_is_truthful_and_structured() {
+        let row = build_failed_transcription_row(
+            &RemoteClientError::HttpStatus {
+                endpoint: RemoteEndpoint::Transcribe,
+                status: StatusCode::BAD_GATEWAY,
+                body: Some("upstream unavailable".to_string()),
+            },
+            "base.en",
+            "recordings/failure.wav",
+        );
+
+        assert_eq!(row["status"].as_str().unwrap(), "failed");
+        assert_eq!(row["error_kind"].as_str().unwrap(), "remote_http_status");
+        assert_eq!(row["error_detail"].as_str().unwrap(), "Server error: 502 Bad Gateway");
+        assert_eq!(row["recording_file"].as_str().unwrap(), "recordings/failure.wav");
+        assert_eq!(row["model"].as_str().unwrap(), "base.en");
+        assert_eq!(row["can_retry_from_history"].as_bool().unwrap(), true);
+        assert_ne!(
+            row["text"].as_str().unwrap(),
+            "Remote server unreachable - re-transcribe to get text"
+        );
     }
 }
 
@@ -2050,7 +2475,7 @@ pub async fn stop_recording(
             return;
         }
 
-        let transcription_result: Result<String, String> = match &engine_selection_for_task {
+        let transcription_result: Result<String, TranscriptionFailure> = match &engine_selection_for_task {
             ActiveEngineSelection::Whisper { model_path, .. } => {
                 let transcriber = {
                     let cache_state = app_for_task.state::<AsyncMutex<TranscriberCache>>();
@@ -2113,18 +2538,14 @@ pub async fn stop_recording(
                                 ))
                                 .await;
                             } else {
-                                log::error!(
-                                    "Transcription failed after {} attempts: {}",
-                                    MAX_RETRIES,
-                                    e
-                                );
+                                log::error!("Transcription failed after {} attempts: {}", MAX_RETRIES, e);
                             }
                         }
                     }
                 }
 
-                result
-            }
+                result.map_err(TranscriptionFailure::Local)
+            },
             ActiveEngineSelection::Parakeet { model_name } => {
                 let parakeet_manager = app_for_task.state::<ParakeetManager>();
                 if let Err(e) = parakeet_manager.load_model(&app_for_task, model_name).await {
@@ -2151,11 +2572,11 @@ pub async fn stop_recording(
                     Ok(ParakeetResponse::Transcription { text, .. }) => Ok(text),
                     Ok(other) => {
                         let message = format!("Unexpected Parakeet response: {:?}", other);
-                        Err(message)
+                        Err(TranscriptionFailure::Local(message))
                     }
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => Err(TranscriptionFailure::Local(e.to_string())),
                 }
-            }
+            },
             ActiveEngineSelection::Soniox { .. } => {
                 match soniox_transcribe_async(
                     &app_for_task,
@@ -2165,122 +2586,67 @@ pub async fn stop_recording(
                 .await
                 {
                     Ok(text) => Ok(text),
-                    Err(e) => Err(e),
+                    Err(e) => Err(TranscriptionFailure::Local(e)),
                 }
-            }
+            },
             ActiveEngineSelection::Remote {
                 server_name,
                 host,
                 port,
                 password,
                 ..
-            } => {
-                // Perform remote transcription in an async block that returns Result
-                let remote_result: Result<String, String> = async {
-                    let remote_start = std::time::Instant::now();
-                    log::info!(
-                        "🌐 [Remote] Starting transcription to '{}' ({}:{})",
-                        server_name,
-                        host,
-                        port
-                    );
+            } => async {
+                let remote_start = std::time::Instant::now();
+                log::info!(
+                    "🌐 [Remote] Starting transcription to '{}' ({}:{})",
+                    server_name,
+                    host,
+                    port
+                );
 
-                    // Read the audio file
-                    let audio_data = std::fs::read(&audio_path_clone)
-                        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+                let audio_data = std::fs::read(&audio_path_clone)
+                    .map_err(|e| TranscriptionFailure::Local(format!("Failed to read audio file: {}", e)))?;
 
-                    let audio_size_kb = audio_data.len() as f64 / 1024.0;
-                    log::info!(
-                        "🌐 [Remote] Sending {:.1} KB audio to '{}' (+{}ms)",
-                        audio_size_kb,
-                        server_name,
-                        remote_start.elapsed().as_millis()
-                    );
+                let audio_size_kb = audio_data.len() as f64 / 1024.0;
+                log::info!(
+                    "🌐 [Remote] Sending {:.1} KB audio to '{}' (+{}ms)",
+                    audio_size_kb,
+                    server_name,
+                    remote_start.elapsed().as_millis()
+                );
 
-                    // Create HTTP client connection
-                    let server_conn = RemoteServerConnection::new(
-                        host.clone(),
-                        *port,
-                        password.clone(),
-                    );
+                let server_conn = RemoteServerConnection::new(
+                    host.clone(),
+                    *port,
+                    password.clone(),
+                );
 
-                    // Send transcription request with short connection timeout
-                    // Use 5 second connect timeout to fail fast on unreachable servers
-                    let client = reqwest::Client::builder()
-                        .connect_timeout(std::time::Duration::from_secs(5))
-                        .timeout(std::time::Duration::from_secs(120)) // Overall timeout for large files
-                        .build()
-                        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-                    let mut request = client
-                        .post(&server_conn.transcribe_url())
-                        .header("Content-Type", "audio/wav")
-                        .body(audio_data);
-
-                    // Add auth header if password is set
-                    if let Some(pwd) = server_conn.password.as_ref() {
-                        request = request.header("X-VoiceTypr-Key", pwd);
+                let request = TranscriptionRequest::new(audio_data, TranscriptionSource::LiveRecording);
+                let timeout_ms = timeout_ms_for_wav_file(
+                    audio_path_clone.to_string_lossy().as_ref(),
+                    TranscriptionSource::LiveRecording,
+                );
+                match client::transcribe_audio(&server_conn, request, timeout_ms).await {
+                    Ok(response) => {
+                        log::info!(
+                            "🌐 [Remote] Transcription COMPLETED from '{}': {} chars received",
+                            server_name,
+                            response.text.len()
+                        );
+                        Ok(response.text)
                     }
-
-                    log::info!(
-                        "🌐 [Remote] Sending HTTP request to '{}' (+{}ms)",
-                        server_name,
-                        remote_start.elapsed().as_millis()
-                    );
-
-                    let response = request.send().await.map_err(|e| {
+                    Err(error) => {
                         log::warn!(
-                            "🌐 [Remote] Connection FAILED to '{}' after {}ms: {}",
+                            "🌐 [Remote] Remote transcription FAILED to '{}' after {}ms: {}",
                             server_name,
                             remote_start.elapsed().as_millis(),
-                            e
+                            error
                         );
-                        format!("Failed to connect to remote server: {}", e)
-                    })?;
-
-                    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-                        log::warn!(
-                            "🌐 [Remote] Authentication FAILED to '{}'",
-                            server_name
-                        );
-                        return Err("Remote server authentication failed".to_string());
+                        Err(TranscriptionFailure::Remote(error))
                     }
-
-                    if !response.status().is_success() {
-                        log::warn!(
-                            "🌐 [Remote] Server error from '{}': {}",
-                            server_name,
-                            response.status()
-                        );
-                        return Err(format!("Remote server error: {}", response.status()));
-                    }
-
-                    let result: serde_json::Value = response.json().await.map_err(|e| {
-                        format!("Failed to parse remote response: {}", e)
-                    })?;
-
-                    let text = result
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| "Invalid response: missing 'text' field".to_string())?;
-
-                    log::info!(
-                        "🌐 [Remote] Transcription COMPLETED from '{}': {} chars received",
-                        server_name,
-                        text.len()
-                    );
-
-                    Ok(text)
-                }
-                .await;
-
-                // Pass through the result like Soniox does
-                match remote_result {
-                    Ok(text) => Ok(text),
-                    Err(e) => Err(e),
                 }
             }
+            .await,
         };
 
         // Try to save recording to persistent storage BEFORE cleanup
@@ -2288,11 +2654,11 @@ pub async fn stop_recording(
         // On recoverable failure (remote server errors): always save to preserve for re-transcription
         let recording_file = match &transcription_result {
             Ok(_) => maybe_save_recording(&app_for_task, &audio_path_clone).await,
-            Err(_) if matches!(engine_selection_for_task, ActiveEngineSelection::Remote { .. }) => {
+            Err(TranscriptionFailure::Remote(_)) => {
                 log::info!("Preserving recording for failed remote transcription");
                 save_recording(&app_for_task, &audio_path_clone).await
             }
-            Err(_) => None,
+            Err(TranscriptionFailure::Local(_)) => None,
         };
 
         // Clean up temp file regardless of outcome
@@ -2516,134 +2882,143 @@ pub async fn stop_recording(
                     // 6. Transition to idle state
                     update_recording_state(&app_for_process, RecordingState::Idle, None);
                 });
-            }
-            Err(e) => {
-                // Check if this is a cancellation error
-                if e.contains("cancelled") {
-                    log::info!("Handling transcription cancellation");
-                    // For cancellation, hide pill (only if show_pill_indicator is false) and go to Idle
-                    if should_hide_pill(&app_for_task).await {
-                        if let Err(hide_err) =
-                            crate::commands::window::hide_pill_widget(app_for_task.clone()).await
-                        {
-                            log::error!("Failed to hide pill window on cancellation: {}", hide_err);
-                        }
-                    }
-                    update_recording_state(&app_for_task, RecordingState::Idle, None);
-                } else if e.contains("too short") {
-                    // Handle "too short" errors with specific user feedback
-                    log::info!("Recording was too short: {}", e);
-
-                    // Clean up the audio file
-                    if let Err(cleanup_err) = std::fs::remove_file(&audio_path_clone) {
-                        log::warn!("Failed to remove short audio file: {}", cleanup_err);
-                    }
-
-                    // Emit specific feedback via pill toast
-                    pill_toast(&app_for_task, &e, 1000);
-
-                    // Hide pill after showing feedback
-                    let app_for_reset = app_for_task.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-
-                        // Only hide if show_pill_indicator is false
-                        if should_hide_pill(&app_for_reset).await {
-                            if let Err(e) =
-                                crate::commands::window::hide_pill_widget(app_for_reset.clone())
-                                    .await
+            },
+            Err(failure) => {
+                match &failure {
+                    TranscriptionFailure::Local(e) if e.contains("cancelled") => {
+                        log::info!("Handling transcription cancellation");
+                        // For cancellation, hide pill (only if show_pill_indicator is false) and go to Idle
+                        if should_hide_pill(&app_for_task).await {
+                            if let Err(hide_err) =
+                                crate::commands::window::hide_pill_widget(app_for_task.clone()).await
                             {
-                                log::error!("Failed to hide pill window: {}", e);
+                                log::error!("Failed to hide pill window on cancellation: {}", hide_err);
                             }
                         }
+                        update_recording_state(&app_for_task, RecordingState::Idle, None);
+                    },
+                    TranscriptionFailure::Local(e) if e.contains("too short") => {
+                        // Handle "too short" errors with specific user feedback
+                        log::info!("Recording was too short: {}", e);
 
-                        update_recording_state(&app_for_reset, RecordingState::Idle, None);
-                    });
-                } else if e.contains("remote server") || e.contains("Remote server") || e.contains("Connection refused") {
-                    // Remote server error - emit specific event for system notification
-                    log::warn!("Remote server error: {}", e);
+                        // Clean up the audio file
+                        if let Err(cleanup_err) = std::fs::remove_file(&audio_path_clone) {
+                            log::warn!("Failed to remove short audio file: {}", cleanup_err);
+                        }
 
-                    // Save failed transcription to history if we preserved the recording
-                    if let Some(ref saved_recording) = recording_file {
-                        let app_for_history = app_for_task.clone();
-                        let error_msg = e.clone();
-                        let model_name = selected_model_name_for_task.clone();
-                        let recording_filename = saved_recording.clone();
+                        // Emit specific feedback via pill toast
+                        pill_toast(&app_for_task, &e, 1000);
+
+                        // Hide pill after showing feedback
+                        let app_for_reset = app_for_task.clone();
                         tokio::spawn(async move {
-                            if let Err(save_err) = save_failed_transcription(
+                            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+                            // Only hide if show_pill_indicator is false
+                            if should_hide_pill(&app_for_reset).await {
+                                if let Err(e) =
+                                    crate::commands::window::hide_pill_widget(app_for_reset.clone())
+                                        .await
+                                {
+                                    log::error!("Failed to hide pill window: {}", e);
+                                }
+                            }
+
+                            update_recording_state(&app_for_reset, RecordingState::Idle, None);
+                        });
+                    },
+                    TranscriptionFailure::Remote(remote_error) => {
+                        // Remote server error - emit specific event for system notification
+                        log::warn!("Remote server error: {}", remote_error);
+
+                        let can_retry_from_history = if let Some(ref saved_recording) = recording_file {
+                            let app_for_history = app_for_task.clone();
+                            let model_name = selected_model_name_for_task.clone();
+                            let recording_filename = saved_recording.clone();
+                            match save_failed_transcription(
                                 &app_for_history,
-                                error_msg,
+                                remote_error,
                                 model_name,
                                 recording_filename,
-                            ).await {
-                                log::error!("Failed to save failed transcription: {}", save_err);
+                            )
+                            .await
+                            {
+                                Ok(_) => true,
+                                Err(save_err) => {
+                                    log::error!("Failed to save failed transcription: {}", save_err);
+                                    false
+                                }
                             }
-                        });
+                        } else {
+                            false
+                        };
 
                         // Emit event for frontend to show system notification with guidance
-                        let _ = app_for_task.emit("remote-server-error", serde_json::json!({
-                            "message": e.clone(),
-                            "title": "Remote Server Unreachable"
-                        }));
-
-                        // Update pill message to guide user to History
-                        pill_toast(&app_for_task, "Remote server unreachable. Go to History to re-transcribe, or select a different model.", 6000);
-                    } else {
-                        // Emit event for frontend - no recording saved
-                        let _ = app_for_task.emit("remote-server-error", serde_json::json!({
-                            "message": e.clone(),
-                            "title": "Remote Server Unavailable"
-                        }));
-                        pill_toast(&app_for_task, "Remote server unavailable", 2000);
-                    }
-
-                    update_recording_state(&app_for_task, RecordingState::Error, Some(e.clone()));
-
-                    // Transition back to Idle after showing the error
-                    let app_for_reset = app_for_task.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                        if should_hide_pill(&app_for_reset).await {
-                            if let Err(e) =
-                                crate::commands::window::hide_pill_widget(app_for_reset.clone()).await
-                            {
-                                log::error!("Failed to hide pill window: {}", e);
-                            }
-                        }
-                        update_recording_state(&app_for_reset, RecordingState::Idle, None);
-                    });
-                } else {
-                    // For other errors, show error state briefly
-                    update_recording_state(&app_for_task, RecordingState::Error, Some(e.clone()));
-
-                    // Emit error via pill toast
-                    pill_toast(&app_for_task, &e, 1500);
-
-                    // Transition back to Idle after a delay
-                    // This ensures we don't get stuck in Error state
-                    let app_for_reset = app_for_task.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        log::debug!(
-                            "Resetting from Error to Idle state after transcription failure"
+                        let _ = app_for_task.emit(
+                            "remote-server-error",
+                            build_remote_server_error_payload(&failure, can_retry_from_history),
                         );
 
-                        // Hide pill window when transitioning to Idle (only if show_pill_indicator is false)
-                        if should_hide_pill(&app_for_reset).await {
-                            if let Err(e) =
-                                crate::commands::window::hide_pill_widget(app_for_reset.clone())
-                                    .await
-                            {
-                                log::error!("Failed to hide pill window: {}", e);
-                            }
-                        }
+                        // Update pill message to guide user to History only when retry is durable
+                        pill_toast(
+                            &app_for_task,
+                            remote_server_error_pill_message(can_retry_from_history),
+                            if can_retry_from_history { 6000 } else { 2000 },
+                        );
 
-                        update_recording_state(&app_for_reset, RecordingState::Idle, None);
-                    });
+                        update_recording_state(
+                            &app_for_task,
+                            RecordingState::Error,
+                            Some(failure.message()),
+                        );
+
+                        // Transition back to Idle after showing the error
+                        let app_for_reset = app_for_task.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                            if should_hide_pill(&app_for_reset).await {
+                                if let Err(e) =
+                                    crate::commands::window::hide_pill_widget(app_for_reset.clone())
+                                        .await
+                                {
+                                    log::error!("Failed to hide pill window: {}", e);
+                                }
+                            }
+                            update_recording_state(&app_for_reset, RecordingState::Idle, None);
+                        });
+                    },
+                    TranscriptionFailure::Local(e) => {
+                        // For other errors, show error state briefly
+                        update_recording_state(&app_for_task, RecordingState::Error, Some(e.clone()));
+
+                        // Emit error via pill toast
+                        pill_toast(&app_for_task, e, 1500);
+
+                        // Transition back to Idle after a delay
+                        // This ensures we don't get stuck in Error state
+                        let app_for_reset = app_for_task.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            log::debug!(
+                                "Resetting from Error to Idle state after transcription failure"
+                            );
+
+                            // Hide pill window when transitioning to Idle (only if show_pill_indicator is false)
+                            if should_hide_pill(&app_for_reset).await {
+                                if let Err(e) =
+                                    crate::commands::window::hide_pill_widget(app_for_reset.clone())
+                                        .await
+                                {
+                                    log::error!("Failed to hide pill window: {}", e);
+                                }
+                            }
+
+                            update_recording_state(&app_for_reset, RecordingState::Idle, None);
+                        });
+                    }
                 }
             }
-        }
-    });
+    }});
 
     // Track the transcription task
     let app_state = app.state::<AppState>();
@@ -2833,7 +3208,7 @@ pub async fn save_transcription_with_recording(
 /// Save a failed transcription to history with recording file preserved for re-transcription
 pub async fn save_failed_transcription(
     app: &AppHandle,
-    error_message: String,
+    error: &RemoteClientError,
     model: String,
     recording_file: String,
 ) -> Result<(), String> {
@@ -2841,15 +3216,11 @@ pub async fn save_failed_transcription(
         .store("transcriptions")
         .map_err(|e| format!("Failed to get transcriptions store: {}", e))?;
 
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    let transcription_data = serde_json::json!({
-        "text": "Remote server unreachable - re-transcribe to get text",
-        "model": model,
-        "timestamp": timestamp.clone(),
-        "recording_file": recording_file,
-        "status": "failed",
-        "error_detail": error_message
-    });
+    let transcription_data = build_failed_transcription_row(error, &model, &recording_file);
+    let timestamp = transcription_data["timestamp"]
+        .as_str()
+        .ok_or_else(|| "Failed to build failed transcription timestamp".to_string())?
+        .to_string();
 
     store.set(&timestamp, transcription_data.clone());
 
@@ -2875,24 +3246,44 @@ pub async fn get_transcription_history(
     limit: Option<usize>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let store = app.store("transcriptions").map_err(|e| e.to_string())?;
+    let current_session_marker = current_retranscription_session_marker();
 
     let mut entries: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut pending_updates: Vec<(String, serde_json::Value)> = Vec::new();
 
-    // Collect all entries with their timestamps
+    // Collect all entries, reconciling stale retranscription rows before sorting.
     for key in store.keys() {
         if let Some(value) = store.get(&key) {
-            entries.push((key.to_string(), value));
+            let reconciled = reconcile_transcription_history_entry(value.clone(), &current_session_marker);
+            if reconciled != value {
+                pending_updates.push((key.to_string(), reconciled.clone()));
+            }
+            entries.push((key.to_string(), reconciled));
         }
     }
 
-    // Sort by timestamp (newest first)
+    if !pending_updates.is_empty() {
+        for (key, value) in pending_updates {
+            store.set(&key, value);
+        }
+
+        store
+            .save()
+            .map_err(|e| format!("Failed to save reconciled transcription history: {}", e))?;
+
+        if let Err(e) = crate::commands::settings::update_tray_menu(app.clone()).await {
+            log::warn!(
+                "Failed to update tray menu after reconciling transcription history: {}",
+                e
+            );
+        }
+    }
+
     entries.sort_by(|a, b| b.0.cmp(&a.0));
 
-    // Apply limit if specified
     let limit = limit.unwrap_or(50);
     entries.truncate(limit);
 
-    // Return just the values
     Ok(entries.into_iter().map(|(_, v)| v).collect())
 }
 
@@ -3080,59 +3471,21 @@ pub async fn transcribe_audio_file(
             // Create HTTP client connection
             let server_conn = RemoteServerConnection::new(host.clone(), port, password.clone());
 
-            // Send transcription request with extended timeout for large files
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout for large files
-                .build()
-                .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+            let (request, timeout_ms) =
+                build_remote_upload_transcription_request(normalized_file.path(), audio_data);
 
-            let mut request = client
-                .post(&server_conn.transcribe_url())
-                .header("Content-Type", "audio/wav")
-                .body(audio_data);
-
-            // Add auth header if password is set
-            if let Some(pwd) = server_conn.password.as_ref() {
-                request = request.header("X-VoiceTypr-Key", pwd);
-            }
-
-            let response = request.send().await.map_err(|e| {
-                log::warn!(
-                    "🌐 [Remote Upload] Connection FAILED to '{}': {}",
-                    server_name,
-                    e
-                );
-                format!("Failed to connect to remote server: {}", e)
-            })?;
-
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-                log::warn!(
-                    "🌐 [Remote Upload] Authentication FAILED to '{}'",
-                    server_name
-                );
-                return Err("Remote server authentication failed".to_string());
-            }
-
-            if !response.status().is_success() {
-                log::warn!(
-                    "🌐 [Remote Upload] Server error from '{}': {}",
-                    server_name,
-                    response.status()
-                );
-                return Err(format!("Remote server error: {}", response.status()));
-            }
-
-            let result: serde_json::Value = response
-                .json()
+            let response = client::transcribe_audio(&server_conn, request, timeout_ms)
                 .await
-                .map_err(|e| format!("Failed to parse remote response: {}", e))?;
+                .map_err(|e| {
+                    log::warn!(
+                        "🌐 [Remote Upload] Remote transcription FAILED to '{}': {}",
+                        server_name,
+                        e
+                    );
+                    e.to_string()
+                })?;
 
-            let text = result
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| "Invalid response: missing 'text' field".to_string())?;
-
+            let text = response.text;
             log::info!(
                 "🌐 [Remote Upload] Transcription COMPLETED from '{}': {} chars received",
                 server_name,
@@ -3286,58 +3639,21 @@ pub async fn transcribe_audio(
             // Create HTTP client connection
             let server_conn = RemoteServerConnection::new(host.clone(), port, password.clone());
 
-            // Send transcription request with extended timeout for large files
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout for large files
-                .build()
-                .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+            let (request, timeout_ms) =
+                build_remote_upload_transcription_request(normalized_file.path(), audio_data);
 
-            let mut request = client
-                .post(&server_conn.transcribe_url())
-                .header("Content-Type", "audio/wav")
-                .body(audio_data);
-
-            // Add auth header if password is set
-            if let Some(pwd) = server_conn.password.as_ref() {
-                request = request.header("X-VoiceTypr-Key", pwd);
-            }
-
-            let response = request.send().await.map_err(|e| {
-                log::warn!(
-                    "🌐 [Remote Clipboard] Connection FAILED to '{}': {}",
-                    server_name,
-                    e
-                );
-                format!("Failed to connect to remote server: {}", e)
-            })?;
-
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-                log::warn!(
-                    "🌐 [Remote Clipboard] Authentication FAILED to '{}'",
-                    server_name
-                );
-                return Err("Remote server authentication failed".to_string());
-            }
-
-            if !response.status().is_success() {
-                log::warn!(
-                    "🌐 [Remote Clipboard] Server error from '{}': {}",
-                    server_name,
-                    response.status()
-                );
-                return Err(format!("Remote server error: {}", response.status()));
-            }
-
-            let result: serde_json::Value = response
-                .json()
+            let response = client::transcribe_audio(&server_conn, request, timeout_ms)
                 .await
-                .map_err(|e| format!("Failed to parse remote response: {}", e))?;
+                .map_err(|e| {
+                    log::warn!(
+                        "🌐 [Remote Clipboard] Remote transcription FAILED to '{}': {}",
+                        server_name,
+                        e
+                    );
+                    e.to_string()
+                })?;
 
-            let text = result
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| "Invalid response: missing 'text' field".to_string())?;
+            let text = response.text;
 
             log::info!(
                 "🌐 [Remote Clipboard] Transcription COMPLETED from '{}': {} chars received",
@@ -3792,7 +4108,7 @@ pub async fn save_retranscription(
     model: String,
     recording_file: String,
     source_recording_id: String,
-    status: Option<String>,
+    status: Option<TranscriptionStatus>,
 ) -> Result<String, String> {
     // Save transcription to store with current timestamp
     let store = app
@@ -3800,16 +4116,19 @@ pub async fn save_retranscription(
         .map_err(|e| format!("Failed to get transcriptions store: {}", e))?;
 
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let effective_status = status.unwrap_or_else(|| "completed".to_string());
-    let transcription_data = serde_json::json!({
+    let mut transcription_data = serde_json::json!({
         "text": text.clone(),
         "model": model,
         "timestamp": timestamp.clone(),
-        "recording_file": recording_file,
-        "source_recording_id": source_recording_id,
+        "recording_file": recording_file.clone(),
+        "source_recording_id": source_recording_id.clone(),
         "is_retranscription": true,
-        "status": effective_status
     });
+
+    let effective_status = transcription_data
+        .as_object_mut()
+        .ok_or_else(|| "Failed to build retranscription payload".to_string())
+        .map(|map| apply_retranscription_status(map, status))?;
 
     store.set(&timestamp, transcription_data.clone());
 
@@ -3829,9 +4148,10 @@ pub async fn save_retranscription(
     }
 
     log::info!(
-        "Saved retranscription with {} characters (source: {})",
+        "Saved retranscription with {} characters (source: {}, status: {})",
         text.len(),
-        source_recording_id
+        source_recording_id,
+        effective_status.as_str()
     );
     Ok(timestamp)
 }
@@ -3843,7 +4163,7 @@ pub async fn update_transcription(
     timestamp: String,
     text: String,
     model: String,
-    status: Option<String>,
+    status: Option<TranscriptionStatus>,
 ) -> Result<(), String> {
     let store = app
         .store("transcriptions")
@@ -3854,14 +4174,18 @@ pub async fn update_transcription(
         .get(&timestamp)
         .ok_or_else(|| format!("Transcription not found: {}", timestamp))?;
 
-    // Preserve original fields, update text, model, and status
+    // Preserve original fields, update text, model, and status.
     let mut updated = existing.clone();
-    let effective_status = status.unwrap_or_else(|| "completed".to_string());
-    if let serde_json::Value::Object(ref mut map) = updated {
-        map.insert("text".to_string(), serde_json::Value::String(text.clone()));
-        map.insert("model".to_string(), serde_json::Value::String(model.clone()));
-        map.insert("status".to_string(), serde_json::Value::String(effective_status.clone()));
-    }
+    let effective_status = updated
+        .as_object_mut()
+        .ok_or_else(|| "Transcription entry is not an object".to_string())
+        .map(|map| {
+            map.insert("text".to_string(), serde_json::Value::String(text.clone()));
+            map.insert("model".to_string(), serde_json::Value::String(model.clone()));
+            let effective_status = apply_retranscription_status(map, status);
+            sync_retranscription_failure_metadata(map, effective_status, &text);
+            effective_status
+        })?;
 
     store.set(&timestamp, updated.clone());
 
@@ -3874,7 +4198,7 @@ pub async fn update_transcription(
         "timestamp": timestamp,
         "text": text,
         "model": model,
-        "status": effective_status
+        "status": transcription_status_value(effective_status)
     }));
 
     // Refresh tray menu (best-effort)

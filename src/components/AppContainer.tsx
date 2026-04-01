@@ -11,8 +11,10 @@ import { useReadiness } from "@/contexts/ReadinessContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { useEventCoordinator } from "@/hooks/useEventCoordinator";
 import { useModelManagementContext } from "@/contexts/ModelManagementContext";
+import { useModelAvailability } from "@/hooks/useModelAvailability";
 import { updateService } from "@/services/updateService";
 import { loadApiKeysToCache } from "@/utils/keyring";
+
 
 // Type for error event payloads from backend
 interface ErrorEventPayload {
@@ -32,12 +34,16 @@ export function AppContainer() {
   const [forceShowOnboarding, setForceShowOnboarding] = useState(false);
   const { settings, refreshSettings } = useSettings();
   const { checkAccessibilityPermission, checkMicrophonePermission } = useReadiness();
+  const modelAvailability = useModelAvailability();
+
 
   // Use the model management context for onboarding
   const modelManagement = useModelManagementContext();
 
-  // Use a ref to track if we've just completed onboarding
-  const hasJustCompletedOnboarding = useRef(false);
+  // Track explicit onboarding completion so recovery-driven onboarding doesn't trigger post-onboarding effects.
+  const hasCompletedOnboarding = useRef(false);
+  const previousHasModels = useRef<boolean | null>(modelAvailability.hasModels);
+  const forceOnboardingNeedsFreshAvailability = useRef(false);
 
   // Initialize app
   useEffect(() => {
@@ -126,12 +132,34 @@ export function AppContainer() {
           });
         });
 
-        await register<{ title: string; message: string }>("remote-server-error", async (data) => {
+        const getRemoteServerErrorCopy = (data: {
+          title?: string;
+          message?: string;
+          can_retry_from_history?: boolean;
+        }) => {
+          const title = data.title?.trim() || "Remote Server Unreachable";
+          const message = data.message?.trim() || "The remote server could not complete this recording.";
+          const historyGuidance = data.can_retry_from_history
+            ? "Go to History to re-transcribe this recording, or select a different model."
+            : "";
+
+          return {
+            title,
+            message: historyGuidance ? `${message} ${historyGuidance}` : message
+          };
+        };
+
+        await register<{
+          title?: string;
+          message?: string;
+          can_retry_from_history?: boolean;
+        }>("remote-server-error", async (data) => {
           console.error("Remote server error:", data);
 
-          // Show toast with error info and clear action
-          toast.error("Remote Server Unreachable", {
-            description: "Go to History to re-transcribe this recording, or select a different model.",
+          // Show toast with backend-owned error details and clear action
+          const { title, message } = getRemoteServerErrorCopy(data);
+          toast.error(title, {
+            description: message,
             duration: 8000
           });
 
@@ -144,8 +172,8 @@ export function AppContainer() {
             }
             if (permitted) {
               sendNotification({
-                title: "Remote Server Unreachable",
-                body: "Go to History to re-transcribe, or select a different model."
+                title,
+                body: message
               });
             }
           } catch (err) {
@@ -164,9 +192,15 @@ export function AppContainer() {
           });
         });
 
-        await register<ErrorEventPayload>("no-models-error", (data) => {
+        await register<ErrorEventPayload>("no-models-error", async (data) => {
           console.error("No models available:", data);
           setForceShowOnboarding(true);
+          forceOnboardingNeedsFreshAvailability.current = true;
+          const refreshedAvailability = await modelAvailability.checkModels();
+          if (refreshedAvailability.hasModels === true) {
+            forceOnboardingNeedsFreshAvailability.current = false;
+            setForceShowOnboarding(false);
+          }
           toast.error(data.title || 'No Models Available', {
             description:
               data.message ||
@@ -189,63 +223,44 @@ export function AppContainer() {
         }
       });
     };
-  }, [registerEvent]);
+  }, [registerEvent, modelAvailability.checkModels]);
 
   useEffect(() => {
-    let cancelled = false;
+    const previous = previousHasModels.current;
+    previousHasModels.current = modelAvailability.hasModels;
 
-    const syncStartupOnboardingTruth = async () => {
-      if (!settings?.onboarding_completed) return;
+    if (!(forceShowOnboarding && modelAvailability.hasModels === true)) {
+      return;
+    }
 
-      try {
-        const availability = await invoke<{
-          whisper_available: boolean;
-          parakeet_available: boolean;
-          soniox_selected: boolean;
-          soniox_ready: boolean;
-          remote_selected: boolean;
-          remote_available: boolean;
-        }>('get_recognition_availability_snapshot');
+    if (forceOnboardingNeedsFreshAvailability.current && previous === true) {
+      forceOnboardingNeedsFreshAvailability.current = false;
+      return;
+    }
 
-        const hasTrueNoSource =
-          !availability.whisper_available &&
-          !availability.parakeet_available &&
-          !(availability.soniox_selected && availability.soniox_ready) &&
-          !availability.remote_available;
+    forceOnboardingNeedsFreshAvailability.current = false;
+    const timeoutId = window.setTimeout(() => {
+      setForceShowOnboarding(false);
+    }, 0);
 
-        if (!cancelled && hasTrueNoSource) {
-          setForceShowOnboarding(true);
-        }
-      } catch (error) {
-        console.error('Failed to sync startup onboarding truth:', error);
-      }
-    };
-
-    void syncStartupOnboardingTruth();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [settings?.onboarding_completed]);
+    return () => window.clearTimeout(timeoutId);
+  }, [forceShowOnboarding, modelAvailability.hasModels]);
 
 
   const showOnboarding = Boolean(
-    forceShowOnboarding || settings?.onboarding_completed === false
+    settings?.onboarding_completed === false ||
+    forceShowOnboarding ||
+    modelAvailability.hasModels === false
   );
 
 
-  // Mark when onboarding is being shown
-  useEffect(() => {
-    if (showOnboarding) {
-      hasJustCompletedOnboarding.current = true;
-    }
-  }, [showOnboarding]);
 
-  // Check permissions only when transitioning from onboarding to dashboard
+
+  // Check permissions only after an explicit onboarding completion.
   useEffect(() => {
     // Only refresh if we just completed onboarding and are now showing dashboard
-    if (!showOnboarding && hasJustCompletedOnboarding.current && settings?.onboarding_completed) {
-      hasJustCompletedOnboarding.current = false;
+    if (!showOnboarding && hasCompletedOnboarding.current && settings?.onboarding_completed) {
+      hasCompletedOnboarding.current = false;
 
       Promise.all([checkAccessibilityPermission(), checkMicrophonePermission()]).then(() => {
         console.log("Permissions refreshed after onboarding completion");
@@ -267,6 +282,7 @@ export function AppContainer() {
       <AppErrorBoundary>
         <OnboardingDesktop
           onComplete={() => {
+            hasCompletedOnboarding.current = true;
             setForceShowOnboarding(false);
             refreshSettings();
           }}

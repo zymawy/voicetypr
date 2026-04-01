@@ -11,7 +11,10 @@ use tauri::{
 };
 use tauri_plugin_store::StoreExt;
 
-use crate::remote::client::RemoteServerConnection;
+use crate::remote::client::{
+    self, timeout_ms_for_wav_file, RemoteClientError, RemoteServerConnection, TranscriptionRequest,
+    TranscriptionSource,
+};
 use crate::remote::lifecycle::{RemoteServerManager, SharingStatus};
 use crate::remote::server::StatusResponse;
 use crate::remote::settings::{ConnectionStatus, RemoteSettings, SavedConnection};
@@ -321,14 +324,23 @@ pub async fn remove_remote_server(
     app: AppHandle,
     server_id: String,
     remote_settings: State<'_, AsyncMutex<RemoteSettings>>,
+    server_manager: State<'_, AsyncMutex<RemoteServerManager>>,
 ) -> Result<(), String> {
-    let mut settings = remote_settings.lock().await;
-    settings.remove_connection(&server_id)?;
+    let was_active = {
+        let mut settings = remote_settings.lock().await;
+        let was_active = settings.active_connection_id.as_deref() == Some(server_id.as_str());
+        settings.remove_connection(&server_id)?;
 
-    log::info!("Removed remote server: {}", server_id);
+        log::info!("Removed remote server: {}", server_id);
 
-    // Save settings
-    save_remote_settings(&app, &settings)?;
+        // Save settings
+        save_remote_settings(&app, &settings)?;
+        was_active
+    };
+
+    if was_active {
+        return set_active_remote_server(app, None, remote_settings, server_manager).await;
+    }
 
     Ok(())
 }
@@ -446,7 +458,9 @@ pub async fn test_remote_connection(
     port: u16,
     password: Option<String>,
 ) -> Result<StatusResponse, String> {
-    test_connection(&host, port, password.as_deref()).await
+    test_connection(&host, port, password.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Test connection to a saved remote server
@@ -473,8 +487,9 @@ pub async fn test_remote_server(
         &connection.host,
         connection.port,
         connection.password.as_deref(),
-    )
-    .await?;
+)
+    .await
+    .map_err(|e| e.to_string())?;
 
     // Check if model changed and update if needed
     let new_model = Some(status.model.clone());
@@ -536,7 +551,7 @@ pub(crate) async fn refresh_saved_connection_status(
         &server.host,
         server.port,
         server.password.as_deref(),
-    )
+)
     .await;
 
     let (new_status, new_model) = match check_result {
@@ -547,28 +562,32 @@ pub(crate) async fn refresh_saved_connection_status(
                 (ConnectionStatus::Online, Some(status_response.model))
             }
         }
-        Err(e) => {
-            if e.contains("Authentication failed") {
-                (ConnectionStatus::AuthFailed, None)
-            } else {
-                (ConnectionStatus::Offline, None)
-            }
+        Err(error) => {
+            log::warn!(
+                "[Remote Client] Status probe failed for '{}': {}",
+                server.display_name(),
+                error
+            );
+            (connection_status_for_remote_error(&error), None)
         }
     };
 
-    let updated_server = {
+    let (updated_server, was_active) = {
         let mut settings = remote_settings.lock().await;
+        let was_active = settings.active_connection_id.as_deref() == Some(server_id);
         settings.update_connection_status(server_id, new_status.clone(), new_model.clone());
         if let Err(e) = save_remote_settings(app, &settings) {
             log::warn!("Failed to save remote settings: {}", e);
         }
 
-        settings
+        let updated_server = settings
             .saved_connections
             .iter()
             .find(|s| s.id == server_id)
             .cloned()
-            .ok_or_else(|| format!("Server '{}' not found after update", server_id))?
+            .ok_or_else(|| format!("Server '{}' not found after update", server_id))?;
+
+        (updated_server, was_active)
     };
 
     let _ = app.emit(
@@ -579,8 +598,57 @@ pub(crate) async fn refresh_saved_connection_status(
         }),
     );
 
+    if was_active {
+        let availability = crate::recognition::emit_recognition_availability(app).await;
+        if let Err(error) = crate::recognition::auto_select_model_if_needed(app, &availability).await {
+            log::warn!("Failed to reconcile onboarding/model selection after active remote refresh: {}", error);
+        }
+    }
+
     log::debug!("🔄 [REMOTE] Server {} status: {:?}", server_id, new_status);
     Ok(updated_server)
+}
+
+pub(crate) async fn refresh_active_remote_server_status_impl(
+    app: &AppHandle,
+    remote_settings: &AsyncMutex<RemoteSettings>,
+) -> Result<Option<SavedConnection>, String> {
+    let active_remote_id = {
+        let settings = remote_settings.lock().await;
+        settings.active_connection_id.clone()
+    };
+
+    let Some(active_remote_id) = active_remote_id else {
+        return Ok(None);
+    };
+
+    let has_active_connection = {
+        let settings = remote_settings.lock().await;
+        settings.get_connection(&active_remote_id).is_some()
+    };
+
+    if !has_active_connection {
+        let mut settings = remote_settings.lock().await;
+        settings.active_connection_id = None;
+        save_remote_settings(app, &settings)?;
+        let availability = crate::recognition::emit_recognition_availability(app).await;
+        if let Err(error) = crate::recognition::auto_select_model_if_needed(app, &availability).await {
+            log::warn!("Failed to reconcile onboarding/model selection after clearing orphaned active remote: {}", error);
+        }
+        return Ok(None);
+    }
+
+    let refreshed = refresh_saved_connection_status(app, &active_remote_id).await?;
+    Ok(Some(refreshed))
+}
+
+/// Refresh only the active remote server status, if one is selected
+#[tauri::command]
+pub async fn refresh_active_remote_server_status(
+    app: AppHandle,
+    remote_settings: State<'_, AsyncMutex<RemoteSettings>>,
+) -> Result<Option<SavedConnection>, String> {
+    refresh_active_remote_server_status_impl(&app, &*remote_settings).await
 }
 
 #[tauri::command]
@@ -712,6 +780,13 @@ pub async fn set_active_remote_server(
         save_remote_settings(&app, &settings)?;
         log::info!("⏱️ [TIMING] Remote settings saved (+{}ms)", cmd_start.elapsed().as_millis());
     }
+
+
+    let availability = crate::recognition::emit_recognition_availability(&app).await;
+    if let Err(error) = crate::recognition::auto_select_model_if_needed(&app, &availability).await {
+        log::warn!("Failed to reconcile onboarding/model selection after active remote change: {}", error);
+    }
+
 
     // Restore sharing if we were using it before switching to remote
     if should_restore_sharing {
@@ -912,7 +987,7 @@ pub async fn transcribe_remote(
         display_name,
         connection.host,
         connection.port
-    );
+);
 
     // Read the audio file
     let audio_data =
@@ -923,143 +998,50 @@ pub async fn transcribe_remote(
         "[Remote Client] Sending {:.1} KB audio to '{}'",
         audio_size_kb,
         display_name
-    );
+);
+
+    let timeout_ms = timeout_ms_for_wav_file(&audio_path, TranscriptionSource::Upload);
 
     // Create HTTP client connection
     let server_conn =
         RemoteServerConnection::new(connection.host, connection.port, connection.password);
 
-    // Send transcription request
-    let client = reqwest::Client::new();
-    let mut request = client
-        .post(&server_conn.transcribe_url())
-        .header("Content-Type", "audio/wav")
-        .body(audio_data);
-
-    // Add auth header if password is set
-    if let Some(pwd) = server_conn.password.as_ref() {
-        request = request.header("X-VoiceTypr-Key", pwd);
-    }
-
-    let response = request.send().await.map_err(|e| {
-        log::warn!(
-            "[Remote Client] Connection FAILED to '{}': {}",
-            display_name,
-            e
-        );
-        format!("Failed to send request: {}", e)
-    })?;
-
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        log::warn!(
-            "[Remote Client] Authentication FAILED to '{}'",
-            display_name
-        );
-        return Err("Authentication failed".to_string());
-    }
-
-    if !response.status().is_success() {
-        log::warn!(
-            "[Remote Client] Server error from '{}': {}",
-            display_name,
-            response.status()
-        );
-        return Err(format!("Server error: {}", response.status()));
-    }
-
-    let result: serde_json::Value = response
-        .json()
+    let request = TranscriptionRequest::new(audio_data, TranscriptionSource::Upload);
+    let response = client::transcribe_audio(&server_conn, request, timeout_ms)
         .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    let text = result
-        .get("text")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Invalid response: missing 'text' field".to_string())?;
+        .map_err(|e| e.to_string())?;
 
     log::info!(
         "[Remote Client] Transcription COMPLETED from '{}': {} chars received",
         display_name,
-        text.len()
+        response.text.len()
     );
 
-    Ok(text)
+    Ok(response.text)
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
 /// Test connection to a remote server
-/// Uses blocking HTTP client in a separate thread to avoid async runtime issues on Intel Macs
+/// Uses the Intel-Mac-safe blocking helper in `remote::client`
 async fn test_connection(
     host: &str,
     port: u16,
     password: Option<&str>,
-) -> Result<StatusResponse, String> {
+) -> Result<StatusResponse, RemoteClientError> {
     let conn = RemoteServerConnection::new(host.to_string(), port, password.map(String::from));
-    let url = conn.status_url();
-    let password_owned = password.map(String::from);
-    let host_clone = host.to_string();
-    let port_clone = port;
 
     log::info!("[Remote Client] Testing connection to {}:{}", host, port);
 
-    // Use blocking client in spawn_blocking to avoid tokio async I/O issues on Intel Macs
-    let status = tokio::task::spawn_blocking(move || {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    client::test_connection(&conn).await
+}
 
-        let mut request = client.get(&url);
-
-        if let Some(pwd) = password_owned.as_ref() {
-            request = request.header("X-VoiceTypr-Key", pwd);
-        }
-
-        let response = request.send().map_err(|e| {
-            log::warn!(
-                "[Remote Client] Connection test FAILED to {}:{} - {}",
-                host_clone, port_clone, e
-            );
-            format!("Failed to connect: {}", e)
-        })?;
-
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            log::warn!(
-                "[Remote Client] Connection test REJECTED - authentication failed for {}:{}",
-                host_clone, port_clone
-            );
-            return Err("Authentication failed".to_string());
-        }
-
-        if !response.status().is_success() {
-            log::warn!(
-                "[Remote Client] Connection test FAILED - server error {} for {}:{}",
-                response.status(), host_clone, port_clone
-            );
-            return Err(format!("Server error: {}", response.status()));
-        }
-
-        response
-            .json::<StatusResponse>()
-            .map_err(|e| format!("Failed to parse response: {}", e))
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))??;
-
-    log::info!(
-        "[Remote Client] Connection test SUCCEEDED to '{}' ({}:{}) - model: '{}', version: {}",
-        status.name,
-        host,
-        port,
-        status.model,
-        status.version
-    );
-
-    Ok(status)
+pub(crate) fn connection_status_for_remote_error(
+    error: &RemoteClientError,
+) -> ConnectionStatus {
+    if error.is_auth_failure() {
+        ConnectionStatus::AuthFailed
+    } else {
+        ConnectionStatus::Offline
+    }
 }
 
 /// Save remote settings to the store
@@ -1080,6 +1062,20 @@ pub fn save_remote_settings(app: &AppHandle, settings: &RemoteSettings) -> Resul
 }
 
 /// Load remote settings from the store
+pub(crate) fn normalize_loaded_active_remote_status(settings: &mut RemoteSettings) {
+    let Some(active_id) = settings.active_connection_id.clone() else {
+        return;
+    };
+
+    if let Some(connection) = settings.saved_connections.iter_mut().find(|c| c.id == active_id) {
+        connection.status = ConnectionStatus::Unknown;
+        return;
+    }
+
+    settings.active_connection_id = None;
+}
+
+
 pub fn load_remote_settings(app: &AppHandle) -> RemoteSettings {
     log::info!("🔧 [REMOTE] load_remote_settings called");
 
@@ -1107,9 +1103,7 @@ pub fn load_remote_settings(app: &AppHandle) -> RemoteSettings {
         })
         .unwrap_or_default();
 
-    if let Some(active_id) = settings.active_connection_id.clone() {
-        settings.update_connection_status(&active_id, ConnectionStatus::Unknown, None);
-    }
+    normalize_loaded_active_remote_status(&mut settings);
 
     log::info!(
         "🔧 [REMOTE] Loaded settings: {} connections, active_id={:?}",

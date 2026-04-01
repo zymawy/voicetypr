@@ -78,6 +78,7 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
   const [loadingSources, setLoadingSources] = useState(false);
   const [reTranscribingIds, setReTranscribingIds] = useState<Set<string>>(new Set());
   const [verifiedRecordings, setVerifiedRecordings] = useState<Set<string>>(new Set());
+  const [checkedRecordings, setCheckedRecordings] = useState<Set<string>>(new Set());
   // Track which items are being re-transcribed and with which model
   const { modelOrder } = useModelManagementContext();
   const [reTranscribingModels, setReTranscribingModels] = useState<Map<string, string>>(new Map());
@@ -132,6 +133,7 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
     const verifyRecordings = async () => {
       console.log("[RecentRecordings] Starting verification for", history.length, "items");
       const verified = new Set<string>();
+      const checked = new Set<string>();
       let itemsWithRecordingFile = 0;
       for (const item of history) {
         if (item.recording_file) {
@@ -141,6 +143,7 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
             const exists = await invoke<boolean>("check_recording_exists", {
               filename: item.recording_file
             });
+            checked.add(item.id);
             console.log("[RecentRecordings] Recording", item.recording_file, "exists:", exists);
             if (exists) {
               verified.add(item.id);
@@ -151,6 +154,7 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
         }
       }
       console.log("[RecentRecordings] Verification complete. Items with recording_file:", itemsWithRecordingFile, "Verified:", verified.size);
+      setCheckedRecordings(checked);
       setVerifiedRecordings(verified);
     };
     verifyRecordings();
@@ -542,6 +546,7 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                   <div className="space-y-2">
                     {items.map((item) => {
                       const isFailed = item.status === 'failed';
+                      // Persisted in_progress rows should already have been backend-reconciled before render.
                       const isPersistedInProgress = item.status === 'in_progress';
                       const isInProgress = reTranscribingIds.has(item.id) || isPersistedInProgress;
                       return (
@@ -578,7 +583,11 @@ export function RecentRecordings({ history, hotkey = "Cmd+Shift+Space", onHistor
                             <div className="flex items-center gap-2">
                               <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
                               <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">
-                                Transcription failed - recording preserved
+                                {verifiedRecordings.has(item.id)
+                                  ? 'Transcription failed - recording preserved'
+                                  : checkedRecordings.has(item.id)
+                                    ? 'Transcription failed - recording unavailable for retry'
+                                    : 'Transcription failed'}
                               </span>
                             </div>
                             {verifiedRecordings.has(item.id) && (

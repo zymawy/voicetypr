@@ -1,39 +1,61 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { waitFor } from '@testing-library/react';
 import { AppContainer } from './AppContainer';
 
-const mockInvoke = vi.fn();
+const {
+  toastErrorMock,
+  sendNotificationMock,
+  isPermissionGrantedMock,
+  requestPermissionMock,
+  checkAccessibilityPermissionMock,
+  checkMicrophonePermissionMock,
+  requestNotificationPermissionServiceMock,
+  refreshSettingsMock,
+  mockInvoke,
+  tauriEventListeners,
+} = vi.hoisted(() => ({
+  toastErrorMock: vi.fn(),
+  sendNotificationMock: vi.fn(),
+  isPermissionGrantedMock: vi.fn(),
+  requestPermissionMock: vi.fn(),
+  checkAccessibilityPermissionMock: vi.fn(),
+  checkMicrophonePermissionMock: vi.fn(),
+  requestNotificationPermissionServiceMock: vi.fn(),
+  refreshSettingsMock: vi.fn(),
+  mockInvoke: vi.fn(),
+  tauriEventListeners: new Map<string, Set<(event: { payload: unknown }) => void>>(),
+}));
+
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
+}));
+
+vi.mock('sonner', () => ({
+  toast: {
+    error: toastErrorMock,
+  },
+}));
+
+vi.mock('@tauri-apps/plugin-notification', () => ({
+  sendNotification: sendNotificationMock,
+  isPermissionGranted: isPermissionGrantedMock,
+  requestPermission: requestPermissionMock,
 }));
 
 // Mock contexts with simple defaults
 const mockSettings = {
   onboarding_completed: true,
   transcription_cleanup_days: 30,
-  hotkey: 'Cmd+Shift+Space'
+  hotkey: 'Cmd+Shift+Space',
 };
 
-const mockModelAvailability = {
-  hasModels: true,
-  selectedModelAvailable: true,
-  remoteSelected: false,
-  remoteAvailable: false,
-  isChecking: false,
-  checkModels: vi.fn(),
-};
-
-vi.mock('@/hooks/useModelAvailability', () => ({
-  useModelAvailability: () => mockModelAvailability,
-}));
 
 vi.mock('@/contexts/SettingsContext', () => ({
   useSettings: () => ({
     settings: mockSettings,
-    refreshSettings: vi.fn()
-  })
+    refreshSettings: refreshSettingsMock,
+  }),
 }));
 
 vi.mock('@/contexts/LicenseContext', () => ({
@@ -41,17 +63,17 @@ vi.mock('@/contexts/LicenseContext', () => ({
     licenseStatus: {
       is_licensed: false,
       license_key: null,
-      email: null
+      email: null,
     },
-    checkLicense: vi.fn()
-  })
+    checkLicense: vi.fn(),
+  }),
 }));
 
 vi.mock('@/contexts/ReadinessContext', () => ({
   useReadiness: () => ({
-    checkAccessibilityPermission: vi.fn().mockResolvedValue(true),
-    checkMicrophonePermission: vi.fn().mockResolvedValue(true)
-  })
+    checkAccessibilityPermission: checkAccessibilityPermissionMock,
+    checkMicrophonePermission: checkMicrophonePermissionMock,
+  }),
 }));
 
 // Mock ModelManagementContext that AppContainer actually uses
@@ -66,25 +88,46 @@ vi.mock('@/contexts/ModelManagementContext', () => ({
     deleteModel: vi.fn(),
     refreshModels: vi.fn(),
     preloadModel: vi.fn(),
-    verifyModel: vi.fn()
-  })
+    verifyModel: vi.fn(),
+  }),
 }));
 
 // Mock services
 vi.mock('@/services/updateService', () => ({
   updateService: {
     initialize: vi.fn().mockResolvedValue(true),
-    dispose: vi.fn()
-  }
+    dispose: vi.fn(),
+    requestNotificationPermission: requestNotificationPermissionServiceMock,
+    checkForUpdatesManually: vi.fn(),
+  },
 }));
+
 
 vi.mock('@/utils/keyring', () => ({
-  loadApiKeysToCache: vi.fn().mockResolvedValue(true)
+  loadApiKeysToCache: vi.fn().mockResolvedValue(true),
+}));
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn((eventName: string, callback: (event: { payload: unknown }) => void) => {
+    const listeners = tauriEventListeners.get(eventName) ?? new Set<(event: { payload: unknown }) => void>();
+    listeners.add(callback);
+    tauriEventListeners.set(eventName, listeners);
+
+    return Promise.resolve(() => {
+      listeners.delete(callback);
+    });
+  }),
 }));
 
-// Mock components
+
 vi.mock('@/components/onboarding/OnboardingDesktop', () => ({
-  OnboardingDesktop: () => <div data-testid="onboarding">Onboarding</div>
+  OnboardingDesktop: ({ onComplete }: any) => {
+    (window as any).__testOnboardingComplete = onComplete;
+    return (
+      <button data-testid="onboarding">
+        Onboarding
+      </button>
+    );
+  },
 }));
 
 vi.mock('@/components/ui/sidebar', () => ({
@@ -105,7 +148,7 @@ vi.mock('@/components/ui/sidebar', () => ({
   SidebarMenuButton: ({ children }: any) => <button>{children}</button>,
   SidebarTrigger: ({ children }: any) => <button>{children}</button>,
   SidebarFooter: ({ children }: any) => <div>{children}</div>,
-  useSidebar: () => ({ isOpen: true, toggle: vi.fn() })
+  useSidebar: () => ({ isOpen: true, toggle: vi.fn() }),
 }));
 
 vi.mock('./tabs/TabContainer', () => ({
@@ -113,38 +156,86 @@ vi.mock('./tabs/TabContainer', () => ({
     <div data-testid="tab-container">
       Current Tab: {activeSection}
     </div>
-  )
+  ),
 }));
 
 // Mock event coordinator
 vi.mock('@/hooks/useEventCoordinator', () => ({
   useEventCoordinator: () => ({
-    registerEvent: vi.fn()
-  })
+    registerEvent: vi.fn((event: string, callback: any) => {
+      (window as any).__testEventCallbacks = (window as any).__testEventCallbacks || {};
+      (window as any).__testEventCallbacks[event] = callback;
+      return vi.fn();
+    }),
+  }),
 }));
+
+const getRemoteServerErrorHandler = async () => {
+  await waitFor(() => {
+    expect((window as any).__testEventCallbacks?.['remote-server-error']).toBeInstanceOf(Function);
+  });
+
+  return (window as any).__testEventCallbacks['remote-server-error'] as (payload: any) => Promise<void>;
+};
+const emitTauriEvent = (eventName: string, payload: unknown) => {
+  for (const callback of tauriEventListeners.get(eventName) ?? []) {
+    callback({ payload });
+  }
+};
+
+
+const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
 describe('AppContainer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    tauriEventListeners.clear();
     mockSettings.onboarding_completed = true;
-    mockModelAvailability.hasModels = true;
-    mockModelAvailability.isChecking = false;
-    mockModelAvailability.remoteSelected = false;
-    mockModelAvailability.remoteAvailable = false;
-    mockInvoke.mockResolvedValue(null);
+    refreshSettingsMock.mockReset();
+    checkAccessibilityPermissionMock.mockReset().mockResolvedValue(true);
+    checkMicrophonePermissionMock.mockReset().mockResolvedValue(true);
+    requestNotificationPermissionServiceMock.mockReset();
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === 'get_model_status') {
+        return Promise.resolve({
+          models: [
+            { name: 'Local Model', downloaded: true, requires_setup: false },
+          ],
+        });
+      }
+
+      if (command === 'get_recognition_availability_snapshot') {
+        return Promise.resolve({
+          whisper_available: true,
+          parakeet_available: true,
+          soniox_selected: false,
+          soniox_ready: false,
+          remote_selected: false,
+          remote_status: 'online',
+          remote_available: true,
+          remote_last_checked: '2026-03-31T00:00:00Z',
+        });
+      }
+
+      if (command === 'refresh_active_remote_server_status') {
+        return Promise.resolve(null);
+      }
+
+      return Promise.resolve(null);
+    });
   });
 
-  it('shows main app when onboarding is completed', () => {
-    render(<AppContainer />);
+
+  it('shows main app when onboarding is completed', async () => {
+    await act(async () => {
+      render(<AppContainer />);
+    });
     expect(screen.getByTestId('sidebar')).toBeInTheDocument();
     expect(screen.getByTestId('tab-container')).toBeInTheDocument();
   });
 
   it('shows onboarding when not completed and no remote server is active', async () => {
     mockSettings.onboarding_completed = false;
-    mockModelAvailability.hasModels = false;
-    mockModelAvailability.remoteSelected = false;
-    mockModelAvailability.remoteAvailable = false;
     render(<AppContainer />);
 
     await waitFor(() => {
@@ -153,12 +244,30 @@ describe('AppContainer', () => {
 
     expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
   });
+
 
   it('keeps onboarding visible when a remote server is selected but unavailable', async () => {
     mockSettings.onboarding_completed = false;
-    mockModelAvailability.hasModels = false;
-    mockModelAvailability.remoteSelected = true;
-    mockModelAvailability.remoteAvailable = false;
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === 'get_model_status') {
+        return Promise.resolve({ models: [] });
+      }
+
+      if (command === 'get_recognition_availability_snapshot') {
+        return Promise.resolve({
+          whisper_available: false,
+          parakeet_available: false,
+          soniox_selected: false,
+          soniox_ready: false,
+          remote_selected: true,
+          remote_status: 'offline',
+          remote_available: false,
+          remote_last_checked: '2026-03-31T00:00:00Z',
+        });
+      }
+
+      return Promise.resolve(null);
+    });
 
     render(<AppContainer />);
 
@@ -168,6 +277,7 @@ describe('AppContainer', () => {
 
     expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
   });
+
 
   it('shows onboarding when setup is explicitly reset even if sources are available', async () => {
     mockSettings.onboarding_completed = false;
@@ -179,12 +289,214 @@ describe('AppContainer', () => {
 
     expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
   });
+  it('runs post-onboarding side effects after real completion', async () => {
+    mockSettings.onboarding_completed = false;
+    refreshSettingsMock.mockImplementation(() => {
+      mockSettings.onboarding_completed = true;
+    });
+    const { rerender } = render(<AppContainer />);
 
-  it('allows navigation between sections', () => {
+    await waitFor(() => {
+      expect(screen.getByTestId('onboarding')).toBeInTheDocument();
+    });
+    await act(async () => {
+      (window as any).__testOnboardingComplete();
+      rerender(<AppContainer />);
+    });
+
+    await waitFor(() => {
+      expect(refreshSettingsMock).toHaveBeenCalledTimes(1);
+      expect(checkAccessibilityPermissionMock).toHaveBeenCalledTimes(1);
+      expect(checkMicrophonePermissionMock).toHaveBeenCalledTimes(1);
+      expect(requestNotificationPermissionServiceMock).toHaveBeenCalledTimes(1);
+      expect(consoleLogSpy).toHaveBeenCalledWith('Permissions refreshed after onboarding completion');
+    });
+  });
+
+  it('keeps the dashboard visible when a stale no-models error is disproven by a fresh check', async () => {
+    render(<AppContainer />);
+
+    await waitFor(() => {
+      expect((window as any).__testEventCallbacks?.['no-models-error']).toBeInstanceOf(Function);
+      expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+    });
+
+    const callback = (window as any).__testEventCallbacks['no-models-error'];
+    await act(async () => {
+      await callback({
+        title: 'No models available',
+        message: 'Connect a cloud provider or download a local model in Models before recording.',
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('onboarding')).not.toBeInTheDocument();
+  });
+
+  it('clears onboarding when a remote server recovers after a no-models error', async () => {
+    mockInvoke.mockImplementation((command: string) => {
+      if (command === 'get_model_status') {
+        return Promise.resolve({ models: [] });
+      }
+
+      if (command === 'get_recognition_availability_snapshot') {
+        return Promise.resolve({
+          whisper_available: false,
+          parakeet_available: false,
+          soniox_selected: false,
+          soniox_ready: false,
+          remote_selected: true,
+          remote_status: 'unknown',
+          remote_available: false,
+          remote_last_checked: null,
+        });
+      }
+
+      return Promise.resolve(null);
+    });
+
+    render(<AppContainer />);
+
+    await waitFor(() => {
+      expect((window as any).__testEventCallbacks?.['no-models-error']).toBeInstanceOf(Function);
+    });
+
+    const callback = (window as any).__testEventCallbacks['no-models-error'];
+    await act(async () => {
+      callback({
+        title: 'No models available',
+        message: 'Connect a cloud provider or download a local model in Models before recording.',
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('onboarding')).toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      expect(tauriEventListeners.get('recognition-availability')?.size ?? 0).toBeGreaterThan(0);
+    });
+
+    await act(async () => {
+      emitTauriEvent('recognition-availability', {
+        whisper_available: false,
+        parakeet_available: false,
+        soniox_selected: false,
+        soniox_ready: false,
+        remote_selected: true,
+        remote_status: 'online',
+        remote_available: true,
+        remote_last_checked: '2026-03-31T00:01:00Z',
+      });
+    });
+
+
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('onboarding')).not.toBeInTheDocument();
+
+    expect(checkAccessibilityPermissionMock).not.toHaveBeenCalled();
+    expect(checkMicrophonePermissionMock).not.toHaveBeenCalled();
+    expect(requestNotificationPermissionServiceMock).not.toHaveBeenCalled();
+    expect(consoleLogSpy).not.toHaveBeenCalledWith('Permissions refreshed after onboarding completion');
+  });
+
+
+  it('shows History guidance for retryable remote errors', async () => {
+    isPermissionGrantedMock.mockResolvedValue(false);
+    requestPermissionMock.mockResolvedValue('granted');
+
+    render(<AppContainer />);
+
+    const handler = await getRemoteServerErrorHandler();
+    await handler({
+      title: 'Remote recording failed',
+      message: 'The remote server could not complete this recording.',
+      error_kind: 'recording_failed',
+      can_retry_from_history: true,
+    });
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        'Remote recording failed',
+        expect.objectContaining({
+          description: expect.stringContaining('History'),
+        })
+      );
+      expect(requestPermissionMock).toHaveBeenCalled();
+      expect(sendNotificationMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Remote recording failed',
+          body: expect.stringContaining('History'),
+        })
+      );
+    });
+  });
+
+  it('does not mention History for non-retryable remote errors', async () => {
+    isPermissionGrantedMock.mockResolvedValue(true);
+
+    render(<AppContainer />);
+
+    const handler = await getRemoteServerErrorHandler();
+    await handler({
+      title: 'Remote recording failed',
+      message: 'The remote server could not complete this recording.',
+      error_kind: 'recording_failed',
+      can_retry_from_history: false,
+    });
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalled();
+      expect(sendNotificationMock).toHaveBeenCalled();
+    });
+
+    const [toastTitle, toastOptions] = toastErrorMock.mock.calls[0];
+    const [notificationPayload] = sendNotificationMock.mock.calls[0];
+
+    expect(toastTitle).toBe('Remote recording failed');
+    expect(toastOptions.description).toBe('The remote server could not complete this recording.');
+    expect(toastOptions.description).not.toContain('History');
+    expect(notificationPayload.body).toBe('The remote server could not complete this recording.');
+    expect(notificationPayload.body).not.toContain('History');
+  });
+
+  it('falls back conservatively for legacy remote errors without retryability', async () => {
+    isPermissionGrantedMock.mockResolvedValue(true);
+
+    render(<AppContainer />);
+
+    const handler = await getRemoteServerErrorHandler();
+    await handler({
+      title: 'Remote recording failed',
+      message: 'The remote server could not complete this recording.',
+    });
+
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalled();
+      expect(sendNotificationMock).toHaveBeenCalled();
+    });
+
+    const [toastTitle, toastOptions] = toastErrorMock.mock.calls[0];
+    const [notificationPayload] = sendNotificationMock.mock.calls[0];
+
+    expect(toastTitle).toBe('Remote recording failed');
+    expect(toastOptions.description).toBe('The remote server could not complete this recording.');
+    expect(toastOptions.description).not.toContain('History');
+    expect(notificationPayload.body).toBe('The remote server could not complete this recording.');
+    expect(notificationPayload.body).not.toContain('History');
+  });
+
+  it('allows navigation between sections', async () => {
     // This test verifies the AppContainer renders and is interactive
     // The actual navigation is tested through the Sidebar mock
-    render(<AppContainer />);
-    
+    await act(async () => {
+      render(<AppContainer />);
+    });
+
     // Verify the app structure is in place
     expect(screen.getByTestId('sidebar')).toBeInTheDocument();
     expect(screen.getByTestId('tab-container')).toBeInTheDocument();

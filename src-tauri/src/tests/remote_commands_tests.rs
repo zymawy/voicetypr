@@ -9,10 +9,80 @@
 //! - Constants and configurations
 
 use crate::commands::remote::{
+    normalize_loaded_active_remote_status,
     DEFAULT_PORT, FirewallStatus, get_firewall_status, get_local_ips, get_local_machine_id,
     open_firewall_settings,
 };
 use crate::remote::settings::{ConnectionStatus, RemoteSettings, SavedConnection};
+
+#[test]
+fn test_normalize_loaded_active_remote_status_preserves_last_checked() {
+    let mut settings = RemoteSettings::default();
+    let conn = settings.add_connection(
+        "192.168.1.100".to_string(),
+        47842,
+        None,
+        Some("Remote".to_string()),
+        None,
+    );
+    let conn_id = conn.id.clone();
+    settings.set_active_connection(Some(conn_id.clone())).unwrap();
+    let active = settings
+        .saved_connections
+        .iter_mut()
+        .find(|c| c.id == conn_id)
+        .expect("active connection should exist");
+    active.status = ConnectionStatus::Online;
+    active.last_checked = 42_4242;
+
+    normalize_loaded_active_remote_status(&mut settings);
+
+    let active = settings.get_active_connection().expect("active connection should remain");
+    assert_eq!(active.status, ConnectionStatus::Unknown);
+    assert_eq!(active.last_checked, 42_4242);
+}
+
+#[test]
+fn test_normalize_loaded_active_remote_status_is_noop_without_active_remote() {
+    let mut settings = RemoteSettings::default();
+    let conn = settings.add_connection(
+        "192.168.1.101".to_string(),
+        47842,
+        None,
+        Some("Remote".to_string()),
+        None,
+    );
+    let conn_id = conn.id.clone();
+    let original_last_checked = settings.saved_connections[0].last_checked;
+    settings.saved_connections[0].status = ConnectionStatus::Offline;
+    settings.saved_connections[0].last_checked = original_last_checked + 7;
+
+    normalize_loaded_active_remote_status(&mut settings);
+
+    assert!(settings.active_connection_id.is_none());
+    let connection = settings.get_connection(&conn_id).expect("connection should remain");
+    assert_eq!(connection.status, ConnectionStatus::Offline);
+    assert_eq!(connection.last_checked, original_last_checked + 7);
+}
+
+#[test]
+fn test_normalize_loaded_active_remote_status_clears_orphaned_active_id() {
+    let mut settings = RemoteSettings::default();
+    let conn = settings.add_connection(
+        "192.168.1.102".to_string(),
+        47842,
+        None,
+        Some("Remote".to_string()),
+        None,
+    );
+    let conn_id = conn.id.clone();
+    settings.set_active_connection(Some(conn_id.clone())).unwrap();
+    settings.remove_connection(&conn_id).unwrap();
+
+    normalize_loaded_active_remote_status(&mut settings);
+
+    assert!(settings.active_connection_id.is_none());
+}
 
 // ============================================================================
 // Constants Tests
@@ -745,4 +815,45 @@ fn test_switch_active_connection() {
     // Clear active
     settings.set_active_connection(None).unwrap();
     assert!(settings.get_active_connection().is_none());
+}
+
+
+
+use crate::commands::remote::connection_status_for_remote_error;
+use crate::remote::client::{RemoteClientError, RemoteEndpoint};
+
+#[test]
+fn test_remote_client_auth_error_maps_to_auth_failed_status() {
+    let error = RemoteClientError::AuthFailed {
+        endpoint: RemoteEndpoint::Status,
+        body: None,
+    };
+
+    assert_eq!(
+        connection_status_for_remote_error(&error),
+        ConnectionStatus::AuthFailed
+    );
+}
+
+#[test]
+fn test_non_auth_remote_client_errors_map_to_offline_status() {
+    let timeout_error = RemoteClientError::Timeout {
+        endpoint: RemoteEndpoint::Status,
+        timeout_ms: 10_000,
+        detail: "timed out".to_string(),
+    };
+    let http_error = RemoteClientError::HttpStatus {
+        endpoint: RemoteEndpoint::Status,
+        status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        body: Some("maintenance".to_string()),
+    };
+
+    assert_eq!(
+        connection_status_for_remote_error(&timeout_error),
+        ConnectionStatus::Offline
+    );
+    assert_eq!(
+        connection_status_for_remote_error(&http_error),
+        ConnectionStatus::Offline
+    );
 }

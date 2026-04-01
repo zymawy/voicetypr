@@ -41,6 +41,15 @@ const historyItem: TranscriptionHistory = {
   recording_file: 'sample.wav',
 };
 
+const createDeferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+
+  return { promise, resolve };
+};
+
 describe('RecentRecordings re-transcription', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -100,6 +109,7 @@ describe('RecentRecordings re-transcription', () => {
   it('creates a durable in-progress entry before re-transcribing', async () => {
     const user = userEvent.setup();
     const onHistoryUpdate = vi.fn();
+    const transcribeDeferred = createDeferred<string>();
 
     invokeMock.mockImplementation(async (cmd: string) => {
       switch (cmd) {
@@ -116,7 +126,7 @@ describe('RecentRecordings re-transcription', () => {
         case 'save_retranscription':
           return 'retry-1';
         case 'transcribe_audio_file':
-          return 'Re-transcribed text';
+          return transcribeDeferred.promise;
         default:
           return null;
       }
@@ -131,6 +141,8 @@ describe('RecentRecordings re-transcription', () => {
     await user.click(sourceOption);
 
     await waitFor(() => {
+      expect(screen.getByTitle('Re-transcribe')).toBeDisabled();
+      expect(screen.getByText('Re-transcribing with Small (English)...')).toBeInTheDocument();
       expect(invokeMock).toHaveBeenCalledWith('save_retranscription', {
         text: 'In progress...',
         model: 'small.en',
@@ -140,13 +152,19 @@ describe('RecentRecordings re-transcription', () => {
       });
     });
 
-    expect(invokeMock).toHaveBeenCalledWith('update_transcription', {
-      timestamp: 'retry-1',
-      text: 'Re-transcribed text',
-      model: 'small.en',
-      status: 'completed',
+    transcribeDeferred.resolve('Re-transcribed text');
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('update_transcription', {
+        timestamp: 'retry-1',
+        text: 'Re-transcribed text',
+        model: 'small.en',
+        status: 'completed',
+      });
     });
-    expect(onHistoryUpdate).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(onHistoryUpdate).toHaveBeenCalled();
+    });
   });
 
   it('marks the pending retry as failed when re-transcription errors', async () => {
@@ -193,6 +211,66 @@ describe('RecentRecordings re-transcription', () => {
 
     expect(onHistoryUpdate).toHaveBeenCalled();
   });
+
+  it('keeps a loaded persisted in-progress row blocked until backend reconciliation', async () => {
+    render(
+      <RecentRecordings
+        history={[{ ...historyItem, status: 'in_progress', text: 'Still retrying' }]}
+        onHistoryUpdate={vi.fn()}
+      />
+    );
+
+    const retranscribeButton = await screen.findByTitle('Re-transcribe');
+
+    expect(retranscribeButton).toBeDisabled();
+    expect(screen.getByText('Re-transcription in progress with base.en...')).toBeInTheDocument();
+  });
+
+  it('keeps reconciled failed rows retryable after reload', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <RecentRecordings
+        history={[{ ...historyItem, status: 'failed', text: 'Recovered after restart' }]}
+        onHistoryUpdate={vi.fn()}
+      />
+    );
+
+    const retranscribeButton = await screen.findByTitle('Re-transcribe');
+
+    expect(retranscribeButton).toBeEnabled();
+
+    await user.click(retranscribeButton);
+
+    expect(await screen.findByRole('menuitem', { name: 'Small (English)' })).toBeInTheDocument();
+  });
+  it('shows neutral failed copy when the recording is unavailable for retry', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'check_recording_exists':
+          return false;
+        case 'get_model_status':
+          return {
+            models: [{ name: 'small.en', downloaded: true, engine: 'whisper' }],
+          };
+        case 'list_remote_servers':
+          return [];
+        default:
+          return null;
+      }
+    });
+
+    render(
+      <RecentRecordings
+        history={[{ ...historyItem, status: 'failed', text: 'Recovered after restart' }]}
+        onHistoryUpdate={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByText('Transcription failed - recording unavailable for retry')).toBeInTheDocument();
+    expect(screen.queryByTitle('Re-transcribe')).not.toBeInTheDocument();
+  });
+
 });
 
 it('shows Soniox as a cloud retranscription source when configured', async () => {
