@@ -230,7 +230,10 @@ impl AudioRecorder {
                     if stop_requested_clone.load(Ordering::SeqCst) {
                         // Only write on the first callback after stop; skip all subsequent ones
                         if !callback_drained_clone.load(Ordering::SeqCst) {
-                            if let Ok(mut guard) = writer_clone.try_lock() {
+                            // Use lock() not try_lock() here: we're draining, not in the
+                            // real-time path, and the main thread is blocked in the drain
+                            // wait loop so contention is near-impossible.
+                            if let Ok(mut guard) = writer_clone.lock() {
                                 if let Some(writer) = guard.as_mut() {
                                     for &sample in i16_samples {
                                         if let Err(e) = writer.write_sample(sample) {
