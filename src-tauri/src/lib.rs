@@ -369,6 +369,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let window_manager = WindowManager::new(app.app_handle().clone());
             app_state.set_window_manager(window_manager);
 
+            // Warm AI API key cache from secure store BEFORE startup checks run.
+            // This ensures persisted credentials are visible to perform_startup_checks()
+            // without depending on frontend React mount timing.
+            crate::commands::ai::warm_ai_key_cache_from_secure_store(&app.handle().clone());
+
             // Run comprehensive startup checks after state/window manager are ready
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -970,35 +975,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 log::info!("Created toast window for feedback");
             }
 
-            // Sync autostart state with saved settings
-            if let Ok(store) = app.store("settings") {
-                let saved_autostart = store.get("launch_at_startup")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+            // Sync autostart state on startup using shared logic
+            {
+                let app_handle = app.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(store) = app_handle.store("settings") {
+                        let saved_autostart = store.get("launch_at_startup")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
 
-                // Check actual autostart state and sync if needed
-                use tauri_plugin_autostart::ManagerExt;
-                let autolaunch = app.autolaunch();
-
-                match autolaunch.is_enabled() {
-                    Ok(actual_enabled) => {
-                        if actual_enabled != saved_autostart {
-                            log::info!("Syncing autostart state: saved={}, actual={}", saved_autostart, actual_enabled);
-
-                            // Settings are source of truth
-                            if saved_autostart {
-                                if let Err(e) = autolaunch.enable() {
-                                    log::warn!("Failed to enable autostart: {}", e);
+                        // set_autostart will make OS match the saved setting,
+                        // then persist the actual result.
+                        match set_autostart(app_handle.clone(), saved_autostart).await {
+                            Ok(actual) => {
+                                if actual != saved_autostart {
+                                    log::info!(
+                                        "Autostart synced: saved={}, actual={}",
+                                        saved_autostart, actual
+                                    );
                                 }
-                            } else if let Err(e) = autolaunch.disable() {
-                                log::warn!("Failed to disable autostart: {}", e);
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to sync autostart on startup: {}", e);
                             }
                         }
                     }
-                    Err(e) => {
-                        log::warn!("Failed to check autostart state: {}", e);
-                    }
-                }
+                });
             }
 
             // Hide main window on start (menu bar only)
@@ -1108,6 +1110,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             clear_soniox_key_cache,
             get_log_directory,
             open_logs_folder,
+            get_autostart_status,
+            set_autostart,
             get_device_id,
         ])
         .on_window_event(|window, event| {

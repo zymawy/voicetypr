@@ -1,18 +1,26 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { Sparkles } from "lucide-react";
 import { AppErrorBoundary } from "./ErrorBoundary";
 import { Sidebar } from "./Sidebar";
 import { OnboardingDesktop } from "./onboarding/OnboardingDesktop";
 import { SidebarInset, SidebarProvider } from "./ui/sidebar";
 import { TabContainer } from "./tabs/TabContainer";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { useReadiness } from "@/contexts/ReadinessContext";
 import { useSettings } from "@/contexts/SettingsContext";
 import { useEventCoordinator } from "@/hooks/useEventCoordinator";
 import { useModelManagementContext } from "@/contexts/ModelManagementContext";
 import { updateService } from "@/services/updateService";
-import { loadApiKeysToCache } from "@/utils/keyring";
-
 // Type for error event payloads from backend
 interface ErrorEventPayload {
   title?: string;
@@ -29,6 +37,7 @@ export function AppContainer() {
   const { registerEvent } = useEventCoordinator("main");
   const [activeSection, setActiveSection] = useState<string>("overview");
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [justUpdatedVersion, setJustUpdatedVersion] = useState<string | null>(null);
   const { settings, refreshSettings } = useSettings();
   const { checkAccessibilityPermission, checkMicrophonePermission } = useReadiness();
 
@@ -59,14 +68,16 @@ export function AppContainer() {
           await updateService.initialize(settings);
         }
 
-        // Load API keys from Stronghold to backend cache
-        // Small delay to ensure Stronghold is ready
-        setTimeout(() => {
-          loadApiKeysToCache().catch((error) => {
-            console.error("Failed to load API keys to cache:", error);
-          });
-        }, 100);
-
+        // Check if the app was just updated and show post-update dialog
+        const updatedVersion = updateService.getJustUpdatedVersion();
+        if (updatedVersion) {
+          setJustUpdatedVersion(updatedVersion);
+          try {
+            await invoke('focus_main_window');
+          } catch {
+            // Window focus is best-effort; dialog still renders
+          }
+        }
         // Listen for no-models event to redirect to onboarding
         const handleNoModels = () => {
           console.log("No models available - redirecting to onboarding");
@@ -191,13 +202,36 @@ export function AppContainer() {
   // Main App Layout
   return (
     <SidebarProvider>
-      <Sidebar 
-        activeSection={activeSection} 
-        onSectionChange={setActiveSection} 
+      <Sidebar
+        activeSection={activeSection}
+        onSectionChange={setActiveSection}
       />
       <SidebarInset>
         <TabContainer activeSection={activeSection} />
       </SidebarInset>
+
+      {/* Post-update notification dialog */}
+      <Dialog
+        open={!!justUpdatedVersion}
+        onOpenChange={(open) => { if (!open) setJustUpdatedVersion(null); }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-primary" />
+              VoiceTypr Updated
+            </DialogTitle>
+            <DialogDescription>
+              Successfully updated to version {justUpdatedVersion}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={() => setJustUpdatedVersion(null)}>
+              Dismiss
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </SidebarProvider>
   );
 }
