@@ -16,7 +16,6 @@ import { useSettings } from "@/contexts/SettingsContext";
 import { isMacOS } from "@/lib/platform";
 import { PillIndicatorMode, PillIndicatorPosition } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
-import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   AlertCircle,
   Info,
@@ -38,13 +37,13 @@ export function GeneralSettings() {
   const canAutoInsert = useCanAutoInsert();
 
   useEffect(() => {
-    // Check if autostart is enabled on component mount
+    // Query autostart status from backend (OS-level truth)
     const checkAutostart = async () => {
       try {
-        const enabled = await isEnabled();
+        const enabled = await invoke<boolean>('get_autostart_status');
         setAutostartEnabled(enabled);
       } catch (error) {
-        console.error("Failed to check autostart status:", error);
+        console.error('Failed to check autostart status:', error);
       }
     };
     checkAutostart();
@@ -58,20 +57,22 @@ export function GeneralSettings() {
   const handleAutostartToggle = async (checked: boolean) => {
     setAutostartLoading(true);
     try {
-      // Use the plugin API to enable/disable autostart
-      if (checked) {
-        await enable();
-      } else {
-        await disable();
-      }
-      setAutostartEnabled(checked);
+      // Backend handles OS mutation AND store persistence atomically
+      const actualState = await invoke<boolean>('set_autostart', {
+        enabled: checked,
+      });
+      setAutostartEnabled(actualState);
 
-      // Update settings to keep them in sync (backend is source of truth)
-      await updateSettings({ launch_at_startup: checked });
+      // Sync frontend settings with the actual backend state
+      await updateSettings({ launch_at_startup: actualState });
+
+      if (actualState !== checked) {
+        toast.warning(
+          `Autostart ${checked ? 'enable' : 'disable'} failed. Current state: ${actualState ? 'enabled' : 'disabled'}.`,
+        );
+      }
     } catch (error) {
-      console.error("Failed to toggle autostart:", error);
-      // Revert the state if there was an error
-      setAutostartEnabled(!checked);
+      console.error('Failed to toggle autostart:', error);
     } finally {
       setAutostartLoading(false);
     }

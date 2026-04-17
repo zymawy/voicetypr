@@ -16,6 +16,7 @@ export class UpdateService {
   private updateCheckTimer: number | null = null;
   private isSessionActive = false;
   private pendingRelaunch = false;
+  private pendingUpdateVersion: string | null = null;
 
   private constructor() {}
 
@@ -51,19 +52,34 @@ export class UpdateService {
       console.error('Failed to check recording state, proceeding with relaunch:', error);
     }
 
-    // Mark that we're about to relaunch after update
-    localStorage.setItem(JUST_UPDATED_KEY, 'true');
+    // Store the version we're updating to so the next launch can show it
+    if (this.pendingUpdateVersion) {
+      localStorage.setItem(JUST_UPDATED_KEY, this.pendingUpdateVersion);
+    }
 
     try {
       await relaunch();
     } catch (error) {
-      // Rollback: remove flag since relaunch failed
+      // Rollback: remove marker since relaunch failed
       localStorage.removeItem(JUST_UPDATED_KEY);
       console.error('Relaunch failed:', error);
       toast.error('Update installed. Please restart the app manually.', { 
         duration: 10000 
       });
     }
+  }
+
+  /**
+   * Read and clear the just-updated version marker (one-shot).
+   * Returns the version string if the app was just updated, then clears it.
+   * Returns null if no marker exists.
+   */
+  getJustUpdatedVersion(): string | null {
+    const version = localStorage.getItem(JUST_UPDATED_KEY);
+    if (version) {
+      localStorage.removeItem(JUST_UPDATED_KEY);
+    }
+    return version;
   }
 
   static getInstance(): UpdateService {
@@ -75,14 +91,10 @@ export class UpdateService {
 
   /**
    * Initialize the update service
-   * - Shows "Updated" toast if app was just updated
    * - Checks for updates on startup if enabled
    * - Sets up daily update checks
    */
   async initialize(settings: AppSettings): Promise<void> {
-    // Check if app was just updated and show toast
-    await this.showJustUpdatedToast();
-
     // Check if automatic updates are enabled (default to true if not set)
     const autoUpdateEnabled = settings.check_updates_automatically ?? true;
     
@@ -96,27 +108,6 @@ export class UpdateService {
 
     // Set up daily checks
     this.setupDailyUpdateCheck();
-  }
-
-  /**
-   * Show toast if app was just updated, with window focus
-   */
-  private async showJustUpdatedToast(): Promise<void> {
-    const justUpdated = localStorage.getItem(JUST_UPDATED_KEY);
-    if (justUpdated) {
-      localStorage.removeItem(JUST_UPDATED_KEY);
-      
-      try {
-        await invoke('focus_main_window');
-        // Small delay to ensure window is focused before toast appears
-        setTimeout(() => {
-          toast.success('Updated to latest version', { duration: 5000 });
-        }, 200);
-      } catch {
-        // If focus fails, still show the toast
-        toast.success('Updated to latest version', { duration: 5000 });
-      }
-    }
   }
 
   /**
@@ -294,11 +285,13 @@ export class UpdateService {
     if (this.isSessionActive) {
       console.log('Update downloaded but session active - will relaunch when session ends');
       this.pendingRelaunch = true;
+      this.pendingUpdateVersion = update.version;
       toast.dismiss(toastId);
       await this.sendSystemNotification('Update Ready', 'VoiceTypr will restart when recording ends');
       return;
     }
 
+    this.pendingUpdateVersion = update.version;
     await this.performRelaunch();
   }
 
@@ -325,6 +318,7 @@ export class UpdateService {
         if (this.isSessionActive) {
           await this.sendSystemNotification('Update Ready', 'VoiceTypr will restart when recording ends');
         }
+        this.pendingUpdateVersion = update.version;
         await this.performRelaunch();
       } catch (error) {
         console.error('Update installation failed:', error);

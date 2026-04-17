@@ -834,8 +834,55 @@ pub async fn set_audio_device(app: AppHandle, device_name: Option<String>) -> Re
     Ok(())
 }
 
+/// Get the current autostart status from the OS.
+/// Returns the actual OS-level autostart enabled state.
+#[tauri::command]
+pub async fn get_autostart_status(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+    autolaunch.is_enabled().map_err(|e| {
+        log::warn!("Failed to check autostart status: {}", e);
+        e.to_string()
+    })
+}
+
+/// Set autostart enabled/disabled at the OS level and persist the actual state.
+/// Returns the actual OS-level state after the mutation (may differ from requested
+/// if the OS call failed).
+#[tauri::command]
+pub async fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let autolaunch = app.autolaunch();
+
+    if enabled {
+        if let Err(e) = autolaunch.enable() {
+            log::warn!("Failed to enable autostart: {}", e);
+        }
+    } else {
+        if let Err(e) = autolaunch.disable() {
+            log::warn!("Failed to disable autostart: {}", e);
+        }
+    }
+
+    // Query actual state — the OS mutation may have failed silently.
+    let actual = autolaunch.is_enabled().map_err(|e| {
+        log::warn!("Failed to verify autostart state after mutation: {}", e);
+        e.to_string()
+    })?;
+
+    // Persist actual state to settings store.
+    let store = app.store("settings").map_err(|e| e.to_string())?;
+    store.set("launch_at_startup", json!(actual));
+
+    log::info!("Autostart set: requested={}, actual={}", enabled, actual);
+
+    Ok(actual)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{get_autostart_status, set_autostart};
+
     use super::resolve_pill_indicator_mode;
 
     #[test]
@@ -868,5 +915,17 @@ mod tests {
         let resolved = resolve_pill_indicator_mode(None, None, "when_recording".to_string());
 
         assert_eq!(resolved, "when_recording");
+    }
+
+    /// Verify the autostart command functions exist and compile.
+    /// Compilation IS the test: if the functions don't exist or have
+    /// wrong signatures, the imports and generate_handler! macro will fail.
+    #[test]
+    fn test_autostart_commands_exist() {
+        // Binding to a static reference proves the function items exist
+        // at the expected path. The Tauri generate_handler! macro does
+        // further compile-time signature validation in lib.rs.
+        let _get = get_autostart_status;
+        let _set = set_autostart;
     }
 }
