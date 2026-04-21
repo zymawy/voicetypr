@@ -1,0 +1,85 @@
+name: Upstream Sync
+
+on:
+  # Every day at 06:00 UTC
+  schedule:
+    - cron: "0 6 * * *"
+  # Manual trigger from the Actions tab
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (log only, do not push)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Fast-forward main from upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/moinulmoin/voicetypr.git
+          git remote -v
+
+      - name: Fetch upstream
+        run: git fetch upstream --tags --prune
+
+      - name: Check if fast-forward is possible
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count main..upstream/main)
+          AHEAD=$(git rev-list --count upstream/main..main)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "ahead=$AHEAD"   >> "$GITHUB_OUTPUT"
+          echo "Fork is $BEHIND commit(s) behind, $AHEAD commit(s) ahead of upstream/main"
+
+      - name: Fast-forward merge upstream/main
+        if: steps.check.outputs.behind != '0' && steps.check.outputs.ahead == '0'
+        run: |
+          git merge --ff-only upstream/main
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "Dry run: skipping push"
+          else
+            git push origin main
+            git push origin --tags
+          fi
+
+      - name: Open sync PR when fork has diverged
+        if: steps.check.outputs.behind != '0' && steps.check.outputs.ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="sync/upstream-$(date -u +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH" upstream/main
+
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "Dry run: would push $BRANCH and open PR"
+            exit 0
+          fi
+
+          git push origin "$BRANCH"
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: sync upstream/main (${{ steps.check.outputs.behind }} commits)" \
+            --body "Automated sync from [upstream](https://github.com/moinulmoin/voicetypr). Review and merge to bring the fork up to date. Branches have diverged (${{ steps.check.outputs.ahead }} local commits), so this cannot be fast-forwarded."
+
+      - name: No-op when already current
+        if: steps.check.outputs.behind == '0'
+        run: echo "Fork is already up to date with upstream/main."
