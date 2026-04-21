@@ -19,6 +19,7 @@ import {
   Info,
   Key,
   Layers,
+  RefreshCw,
   Settings2,
   Sparkles,
   VerifiedIcon,
@@ -36,6 +37,7 @@ const mainSections = [
   { id: "general", label: "Settings", icon: Settings2 },
   { id: "models", label: "Models", icon: Cpu },
   { id: "formatting", label: "Formatting", icon: Sparkles },
+  { id: "rephrase", label: "Rephrase", icon: RefreshCw },
   { id: "license", label: "License", icon: Key },
   { id: "about", label: "About", icon: Info },
 ];

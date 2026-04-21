@@ -38,3 +38,18 @@ export const fromBackendOptions = (options: EnhancementOptions): {
   preset: options.preset,
   customVocabulary: options.custom_vocabulary,
 });
+
+export type RephraseStyle = 'Professional' | 'Concise' | 'Friendly' | 'FixGrammar' | 'Elaborate';
+
+export interface RephraseSettings {
+  hotkey: string;
+  style: RephraseStyle;
+  custom_instructions?: string;
+}
+
+export interface RephraseResult {
+  original_text: string;
+  rephrased_text: string;
+  provider: string;
+  model: string;
+}

@@ -9,6 +9,7 @@ import { OverviewTab } from "./OverviewTab";
 import { RecordingsTab } from "./RecordingsTab";
 import { SettingsTab } from "./SettingsTab";
 import { AudioUploadSection } from "../sections/AudioUploadSection";
+import { RephraseTab } from "./RephraseTab";
 import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TranscriptionHistory } from "@/types";
@@ -91,6 +92,9 @@ export function TabContainer({ activeSection }: TabContainerProps) {
 
       case "formatting":
         return <EnhancementsTab />;
+
+      case "rephrase":
+        return <RephraseTab />;
 
       case "license":
         return <AccountTab />;

@@ -45,6 +45,10 @@ pub struct Settings {
     pub pill_indicator_offset: u32,
     // Pause system media during recording
     pub pause_media_during_recording: bool,
+    // Rephrase selected text feature
+    pub rephrase_hotkey: Option<String>,
+    pub rephrase_style: String,
+    pub rephrase_custom_instructions: Option<String>,
 }
 
 impl Default for Settings {
@@ -72,6 +76,9 @@ impl Default for Settings {
             pill_indicator_position: "bottom-center".to_string(), // Default to bottom center of screen
             pill_indicator_offset: DEFAULT_INDICATOR_OFFSET,
             pause_media_during_recording: !cfg!(target_os = "macos"),
+            rephrase_hotkey: Some("CommandOrControl+Shift+.".to_string()),
+            rephrase_style: "Professional".to_string(),
+            rephrase_custom_instructions: None,
         }
     }
 }
@@ -243,6 +250,16 @@ pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
             .get("pause_media_during_recording")
             .and_then(|v| v.as_bool())
             .unwrap_or_else(|| Settings::default().pause_media_during_recording),
+        rephrase_hotkey: store
+            .get("rephrase_hotkey")
+            .and_then(|v| v.as_str().map(|s| s.to_string())),
+        rephrase_style: store
+            .get("rephrase_style")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| Settings::default().rephrase_style),
+        rephrase_custom_instructions: store
+            .get("rephrase_custom_instructions")
+            .and_then(|v| v.as_str().map(|s| s.to_string())),
     };
 
     Ok(settings)
@@ -336,6 +353,14 @@ pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), Str
     store.set(
         "pause_media_during_recording",
         json!(settings.pause_media_during_recording),
+    );
+
+    // Save rephrase settings
+    store.set("rephrase_hotkey", json!(settings.rephrase_hotkey));
+    store.set("rephrase_style", json!(settings.rephrase_style));
+    store.set(
+        "rephrase_custom_instructions",
+        json!(settings.rephrase_custom_instructions),
     );
 
     // Save pill position if provided
