@@ -1103,12 +1103,27 @@ pub async fn start_recording(
                 .load(std::sync::atomic::Ordering::SeqCst)
         {
             log::info!("PTT: Key was released during audio init; stopping recorder immediately");
-            // Stop the audio recorder synchronously before transitioning state
+            // Stop the audio recorder synchronously before transitioning state.
+            // If this fails, do not pretend the app is idle: propagate the
+            // failure so the hotkey handler moves to Error and the recorder
+            // remains visible for recovery instead of orphaning capture.
             let recorder_state_handle = app.state::<RecorderState>();
-            if let Ok(mut recorder) = recorder_state_handle.inner().0.lock() {
-                if recorder.is_recording() {
-                    let _ = recorder.stop_recording();
-                }
+            let stop_result = recorder_state_handle
+                .inner()
+                .0
+                .lock()
+                .map_err(|e| format!("Failed to acquire recorder lock: {}", e))
+                .and_then(|mut recorder| {
+                    if recorder.is_recording() {
+                        recorder.stop_recording()
+                    } else {
+                        Ok(String::new())
+                    }
+                });
+
+            if let Err(e) = stop_result {
+                MEDIA_CONTROLLER.resume_if_we_paused();
+                return Err(e);
             }
             MEDIA_CONTROLLER.resume_if_we_paused();
 
