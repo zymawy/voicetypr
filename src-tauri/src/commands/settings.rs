@@ -858,10 +858,8 @@ pub async fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String
         if let Err(e) = autolaunch.enable() {
             log::warn!("Failed to enable autostart: {}", e);
         }
-    } else {
-        if let Err(e) = autolaunch.disable() {
-            log::warn!("Failed to disable autostart: {}", e);
-        }
+    } else if let Err(e) = autolaunch.disable() {
+        log::warn!("Failed to disable autostart: {}", e);
     }
 
     // Query actual state — the OS mutation may have failed silently.
