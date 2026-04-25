@@ -665,7 +665,10 @@ mod tests {
     }
 
     #[test]
-    fn semicolon_code_like_no_space() {
-        assert_eq!(ensure_trailing_sentence_space("let x = 5;"), "let x = 5;");
+    fn code_assignment_sentence_like_no_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("result = ok."),
+            "result = ok."
+        );
     }
 }

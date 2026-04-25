@@ -28,6 +28,8 @@ use tauri_plugin_store::StoreExt;
 
 pub(crate) const PTT_START_ABORTED_AFTER_RELEASE: &str =
     "PTT key released before recording could start";
+const LICENSE_CHECK_TIMEOUT_SECS: u64 = 3;
+const STALE_TRIAL_LICENSE_FALLBACK_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
 /// Atomic counter for toast IDs to prevent race conditions
 static TOAST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -555,13 +557,21 @@ fn select_best_fallback_model(
 fn cached_license_allows_recording(cached: &CachedLicense) -> bool {
     match &cached.status.status {
         LicenseState::Licensed => true,
-        LicenseState::Trial => cached
-            .status
-            .trial_days_left
-            .and_then(|days| u64::try_from(days).ok())
-            .filter(|days| *days > 0)
-            .map(|days| cached.age() < std::time::Duration::from_secs(days * 24 * 60 * 60))
-            .unwrap_or(false),
+        LicenseState::Trial => {
+            // Trial fallback is intentionally short-lived: it only covers
+            // transient offline/timeout failures for a session that recently
+            // proved it still had trial time remaining. Do not extend stale
+            // trial evidence by the number of days remaining in the trial.
+            let has_trial_time_remaining = cached
+                .status
+                .trial_days_left
+                .and_then(|days| u64::try_from(days).ok())
+                .is_some_and(|days| days > 0);
+
+            has_trial_time_remaining
+                && cached.age()
+                    < std::time::Duration::from_secs(STALE_TRIAL_LICENSE_FALLBACK_MAX_AGE_SECS)
+        }
         LicenseState::Expired | LicenseState::None => false,
     }
 }
@@ -628,7 +638,7 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
         // local license evidence. Without that, fail closed instead of allowing
         // indefinite recording when the license service is slow or blocked.
         let check_result = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
+            std::time::Duration::from_secs(LICENSE_CHECK_TIMEOUT_SECS),
             check_license_status_internal(app),
         )
         .await;
@@ -658,12 +668,16 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
             Err(_) => {
                 if let Some(fallback_status) = timeout_fallback_status {
                     log::warn!(
-                        "License check timed out after 3s; using stale in-memory license status for this recording"
+                        "License check timed out after {}s; using stale in-memory license status for this recording",
+                        LICENSE_CHECK_TIMEOUT_SECS
                     );
                     fallback_status
                 } else {
+                    // Deliberate fail-closed path: without local license evidence,
+                    // an offline or slow validation cannot start a new recording.
                     return Err(
-                        "License validation timed out. Please try again when online.".to_string(),
+                        "License validation timed out. Please check your connection and try again."
+                            .to_string(),
                     );
                 }
             }
@@ -1121,11 +1135,8 @@ pub async fn start_recording(
                     }
                 });
 
-            if let Err(e) = stop_result {
-                MEDIA_CONTROLLER.resume_if_we_paused();
-                return Err(e);
-            }
             MEDIA_CONTROLLER.resume_if_we_paused();
+            stop_result?;
 
             // Clean up the audio file
             if let Ok(mut path_guard) = app_state.current_recording_path.lock() {

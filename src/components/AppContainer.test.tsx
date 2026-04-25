@@ -96,8 +96,9 @@ vi.mock('./tabs/TabContainer', () => ({
   )
 }));
 
-// Captured mock for registerEvent so we can verify calls
+// Captured mock for registerEvent so we can verify calls and cleanup
 const mockRegisterEvent = vi.fn();
+const mockUnlisteners: Array<ReturnType<typeof vi.fn>> = [];
 vi.mock('@/hooks/useEventCoordinator', () => ({
   useEventCoordinator: () => ({
     registerEvent: mockRegisterEvent
@@ -113,6 +114,12 @@ describe('AppContainer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSettings.onboarding_completed = true;
+    mockUnlisteners.length = 0;
+    mockRegisterEvent.mockImplementation(() => {
+      const unlisten = vi.fn();
+      mockUnlisteners.push(unlisten);
+      return Promise.resolve(unlisten);
+    });
   });
 
   it('shows main app when onboarding is completed', () => {
@@ -186,6 +193,20 @@ describe('AppContainer', () => {
     // Each event should be registered exactly once
     for (const [name, count] of Object.entries(counts)) {
       expect(count, `Event '${name}' should be registered once`).toBe(1);
+    }
+  });
+
+  it('cleans up registered Tauri event listeners on unmount', async () => {
+    const { unmount } = render(<AppContainer />);
+
+    await waitFor(() => {
+      expect(mockUnlisteners).toHaveLength(6);
+    });
+
+    unmount();
+
+    for (const unlisten of mockUnlisteners) {
+      expect(unlisten).toHaveBeenCalledTimes(1);
     }
   });
 

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Sparkles } from "lucide-react";
@@ -49,6 +50,23 @@ export function AppContainer() {
 
   // Register event listeners once — settings changes must not re-register
   useEffect(() => {
+    const unlisteners: UnlistenFn[] = [];
+    let disposed = false;
+
+    const trackEvent = (unlistenPromise: Promise<UnlistenFn>) => {
+      void unlistenPromise
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            unlisteners.push(unlisten);
+          }
+        })
+        .catch((error) => {
+          console.error("Failed to register app event listener:", error);
+        });
+    };
+
     // Listen for no-models event to redirect to onboarding
     const handleNoModels = () => {
       console.log("No models available - redirecting to onboarding");
@@ -57,28 +75,28 @@ export function AppContainer() {
     window.addEventListener("no-models-available", handleNoModels);
 
     // Listen for navigate-to-settings event from tray menu
-    registerEvent("navigate-to-settings", () => {
+    trackEvent(registerEvent("navigate-to-settings", () => {
       console.log("Navigate to settings requested from tray menu");
       setActiveSection("general");
-    });
+    }));
 
     // Listen for manual update checks triggered from tray
-    registerEvent("tray-check-updates", async () => {
+    trackEvent(registerEvent("tray-check-updates", async () => {
       try {
         await updateService.checkForUpdatesManually();
       } catch (e) {
         console.error("Manual update check failed:", e);
         toast.error("Failed to check for updates");
       }
-    });
+    }));
 
     // Listen for tray action errors
-    registerEvent("tray-action-error", (event) => {
+    trackEvent(registerEvent("tray-action-error", (event) => {
       console.error("Tray action error:", event.payload);
       toast.error(event.payload as string);
-    });
+    }));
 
-    registerEvent<string>("parakeet-unavailable", (message) => {
+    trackEvent(registerEvent<string>("parakeet-unavailable", (message) => {
       const description = typeof message === "string" && message.trim().length > 0
         ? message
         : "Parakeet is unavailable on this Mac. Please reinstall VoiceTypr or remove the quarantine flag.";
@@ -87,10 +105,10 @@ export function AppContainer() {
         description,
         duration: 8000
       });
-    });
+    }));
 
     // Listen for license-required event and navigate to License section
-    registerEvent<{ title: string; message: string; action?: string }>(
+    trackEvent(registerEvent<{ title: string; message: string; action?: string }>(
       "license-required", 
       (data) => {
         console.log("License required event received in AppContainer:", data);
@@ -100,10 +118,10 @@ export function AppContainer() {
           duration: 5000
         });
       }
-    );
+    ));
 
     // Listen for no models error (when trying to record without any models)
-    registerEvent<ErrorEventPayload>("no-models-error", (data) => {
+    trackEvent(registerEvent<ErrorEventPayload>("no-models-error", (data) => {
       console.error("No models available:", data);
       toast.error(data.title || 'No Models Available', {
         description:
@@ -111,10 +129,14 @@ export function AppContainer() {
           'Connect a cloud provider or download a local model in Models before recording.',
         duration: 8000
       });
-    });
+    }));
 
     return () => {
+      disposed = true;
       window.removeEventListener("no-models-available", handleNoModels);
+      for (const unlisten of unlisteners) {
+        unlisten();
+      }
     };
   }, [registerEvent]);
 
