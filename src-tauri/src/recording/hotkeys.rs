@@ -1,4 +1,6 @@
-use crate::commands::audio::{start_recording, stop_recording, RecorderState};
+use crate::commands::audio::{
+    start_recording, stop_recording, RecorderState, PTT_START_ABORTED_AFTER_RELEASE,
+};
 use crate::recording::escape_handler::handle_escape_key_press;
 use crate::{get_recording_state, update_recording_state, AppState, RecordingMode, RecordingState};
 use std::sync::atomic::Ordering;
@@ -183,6 +185,10 @@ fn handle_ptt_mode(
                     let recorder_state = app_handle.state::<RecorderState>();
                     match start_recording(app_handle.clone(), recorder_state).await {
                         Ok(_) => log::info!("PTT: Recording started successfully"),
+                        Err(e) if e == PTT_START_ABORTED_AFTER_RELEASE => {
+                            log::info!("PTT: Recording start cancelled after key release");
+                            update_recording_state(&app_handle, RecordingState::Idle, None);
+                        }
                         Err(e) => {
                             log::error!("PTT: Error starting recording: {}", e);
                             update_recording_state(&app_handle, RecordingState::Error, Some(e));
@@ -218,7 +224,9 @@ fn handle_ptt_mode(
                     // Set the pending flag so start_recording() can honor the stop
                     // as soon as it reaches the Recording state. This prevents
                     // recording from continuing after the user released PTT.
-                    log::info!("PTT: Key released while Starting; setting pending_stop_after_start");
+                    log::info!(
+                        "PTT: Key released while Starting; setting pending_stop_after_start"
+                    );
                     app_state
                         .pending_stop_after_start
                         .store(true, Ordering::SeqCst);

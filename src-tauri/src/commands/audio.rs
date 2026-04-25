@@ -4,7 +4,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::audio::recorder::AudioRecorder;
 use crate::commands::license::check_license_status_internal;
 use crate::commands::settings::{get_settings, resolve_pill_indicator_mode, Settings};
-use crate::license::LicenseState;
+use crate::license::{LicenseState, LicenseStatus};
 use crate::media::MediaPauseController;
 use crate::parakeet::messages::ParakeetResponse;
 use crate::parakeet::ParakeetManager;
@@ -25,6 +25,9 @@ use std::time::Instant;
 use tauri::async_runtime::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_store::StoreExt;
+
+pub(crate) const PTT_START_ABORTED_AFTER_RELEASE: &str =
+    "PTT key released before recording could start";
 
 /// Atomic counter for toast IDs to prevent race conditions
 static TOAST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -549,6 +552,10 @@ fn select_best_fallback_model(
     })
 }
 
+fn license_allows_recording(status: &LicenseStatus) -> bool {
+    matches!(status.status, LicenseState::Licensed | LicenseState::Trial)
+}
+
 /// Pre-recording validation using the readiness state
 async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> {
     let availability = crate::recognition_availability_snapshot(app).await;
@@ -580,24 +587,26 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
     }
 
     // Check license status (with caching to improve performance)
-    let license_status = {
+    let (license_status, timeout_fallback_status) = {
         let app_state = app.state::<AppState>();
         let cache = app_state.license_cache.read().await;
 
         if let Some(cached) = cache.as_ref() {
             if cached.is_valid() {
                 log::debug!("Using cached license status (age: {:?})", cached.age());
-                Some(cached.status.clone())
+                (Some(cached.status.clone()), None)
             } else {
                 log::debug!(
                     "License cache is stale (age: {:?}), will refresh",
                     cached.age()
                 );
-                None
+                let fallback =
+                    license_allows_recording(&cached.status).then(|| cached.status.clone());
+                (None, fallback)
             }
         } else {
             log::debug!("No license cache found, will perform fresh check");
-            None
+            (None, None)
         }
     };
 
@@ -605,9 +614,9 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
         cached_status
     } else {
         // Cache miss or stale - perform license check with a bounded timeout.
-        // This prevents the recording start path from blocking indefinitely on
-        // slow/offline network license validation, which causes PTT key-up to be
-        // missed and recording to start after the user released the key.
+        // Timeout fallback is only allowed when this session already has valid
+        // local license evidence. Without that, fail closed instead of allowing
+        // indefinite recording when the license service is slow or blocked.
         let check_result = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             check_license_status_internal(app),
@@ -627,16 +636,26 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
             }
             Ok(Err(e)) => {
                 log::error!("Failed to check license status: {}", e);
-                // Allow recording if license check fails (graceful degradation)
-                return Ok(());
+                if let Some(fallback_status) = timeout_fallback_status {
+                    log::warn!(
+                        "License check failed; using stale in-memory license status for this recording"
+                    );
+                    fallback_status
+                } else {
+                    return Err(e);
+                }
             }
             Err(_) => {
-                // Timeout - license check took too long.
-                // Allow recording to proceed; enforcement happens on next successful check.
-                log::warn!(
-                    "License check timed out after 3s; allowing recording to proceed (enforcement deferred to next successful validation)"
-                );
-                return Ok(());
+                if let Some(fallback_status) = timeout_fallback_status {
+                    log::warn!(
+                        "License check timed out after 3s; using stale in-memory license status for this recording"
+                    );
+                    fallback_status
+                } else {
+                    return Err(
+                        "License validation timed out. Please try again when online.".to_string(),
+                    );
+                }
             }
         }
     };
@@ -726,10 +745,18 @@ pub async fn start_recording(
     // after the user has already released the PTT key (e.g., during slow license checks).
     {
         let app_state = app.state::<AppState>();
-        let mode = app_state.recording_mode.lock().map(|g| *g).unwrap_or(RecordingMode::Toggle);
-        if mode == RecordingMode::PushToTalk && !app_state.ptt_key_held.load(std::sync::atomic::Ordering::SeqCst) {
+        let mode = app_state
+            .recording_mode
+            .lock()
+            .map(|g| *g)
+            .unwrap_or(RecordingMode::Toggle);
+        if mode == RecordingMode::PushToTalk
+            && !app_state
+                .ptt_key_held
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             log::info!("PTT: Key was released during validation; aborting recording start");
-            return Err("PTT key released before recording could start".to_string());
+            return Err(PTT_START_ABORTED_AFTER_RELEASE.to_string());
         }
     }
 
@@ -1055,8 +1082,16 @@ pub async fn start_recording(
     // Audio capture has already started; if PTT key was released between the first
     // guard (before Starting) and now (e.g., during audio device init), stop immediately.
     {
-        let mode = app_state.recording_mode.lock().map(|g| *g).unwrap_or(RecordingMode::Toggle);
-        if mode == RecordingMode::PushToTalk && !app_state.ptt_key_held.load(std::sync::atomic::Ordering::SeqCst) {
+        let mode = app_state
+            .recording_mode
+            .lock()
+            .map(|g| *g)
+            .unwrap_or(RecordingMode::Toggle);
+        if mode == RecordingMode::PushToTalk
+            && !app_state
+                .ptt_key_held
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             log::info!("PTT: Key was released during audio init; stopping recorder immediately");
             // Stop the audio recorder synchronously before transitioning state
             let recorder_state_handle = app.state::<RecorderState>();
