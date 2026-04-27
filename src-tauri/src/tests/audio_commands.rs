@@ -386,6 +386,30 @@ mod tests {
     }
 
     #[test]
+    fn test_ptt_key_released_recovers_poisoned_mode_lock() {
+        let app_state = AppState::new();
+        {
+            let mut mode = app_state.recording_mode.lock().unwrap();
+            *mode = crate::RecordingMode::PushToTalk;
+        }
+        app_state
+            .ptt_key_held
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let mode_for_thread = app_state.recording_mode.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = mode_for_thread.lock().unwrap();
+            panic!("intentional poison for PTT guard recovery test");
+        })
+        .join();
+
+        assert!(
+            crate::commands::audio::ptt_key_released(&app_state),
+            "PTT guard should recover poisoned mode lock and still detect released key"
+        );
+    }
+
+    #[test]
     fn test_ptt_guard_allows_when_key_still_held() {
         let app_state = AppState::new();
 

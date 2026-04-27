@@ -716,6 +716,21 @@ pub(crate) fn clear_pending_stop_after_start(app_state: &AppState) {
         .store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
+pub(crate) fn ptt_key_released(app_state: &AppState) -> bool {
+    let mode = match app_state.recording_mode.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => {
+            log::warn!("recording_mode mutex poisoned; recovering value for PTT guard");
+            *poisoned.into_inner()
+        }
+    };
+
+    mode == RecordingMode::PushToTalk
+        && !app_state
+            .ptt_key_held
+            .load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[tauri::command]
 pub async fn start_recording(
     app: AppHandle,
@@ -775,16 +790,7 @@ pub async fn start_recording(
     // after the user has already released the PTT key (e.g., during slow license checks).
     {
         let app_state = app.state::<AppState>();
-        let mode = app_state
-            .recording_mode
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(RecordingMode::Toggle);
-        if mode == RecordingMode::PushToTalk
-            && !app_state
-                .ptt_key_held
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if ptt_key_released(&app_state) {
             log::info!("PTT: Key was released during validation; aborting recording start");
             return Err(PTT_START_ABORTED_AFTER_RELEASE.to_string());
         }
@@ -1109,50 +1115,39 @@ pub async fn start_recording(
     // Second PTT guard: check again right before committing to Recording state.
     // Audio capture has already started; if PTT key was released between the first
     // guard (before Starting) and now (e.g., during audio device init), stop immediately.
-    {
-        let mode = app_state
-            .recording_mode
+    if ptt_key_released(&app_state) {
+        log::info!("PTT: Key was released during audio init; stopping recorder immediately");
+        // Stop the audio recorder synchronously before transitioning state.
+        // If this fails, do not pretend the app is idle: propagate the
+        // failure so the hotkey handler moves to Error and the recorder
+        // remains visible for recovery instead of orphaning capture.
+        let recorder_state_handle = app.state::<RecorderState>();
+        let stop_result = recorder_state_handle
+            .inner()
+            .0
             .lock()
-            .map(|g| *g)
-            .unwrap_or(RecordingMode::Toggle);
-        if mode == RecordingMode::PushToTalk
-            && !app_state
-                .ptt_key_held
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            log::info!("PTT: Key was released during audio init; stopping recorder immediately");
-            // Stop the audio recorder synchronously before transitioning state.
-            // If this fails, do not pretend the app is idle: propagate the
-            // failure so the hotkey handler moves to Error and the recorder
-            // remains visible for recovery instead of orphaning capture.
-            let recorder_state_handle = app.state::<RecorderState>();
-            let stop_result = recorder_state_handle
-                .inner()
-                .0
-                .lock()
-                .map_err(|e| format!("Failed to acquire recorder lock: {}", e))
-                .and_then(|mut recorder| {
-                    if recorder.is_recording() {
-                        recorder.stop_recording()
-                    } else {
-                        Ok(String::new())
-                    }
-                });
-
-            clear_pending_stop_after_start(&app_state);
-            MEDIA_CONTROLLER.resume_if_we_paused();
-            stop_result?;
-
-            // Clean up the audio file
-            if let Ok(mut path_guard) = app_state.current_recording_path.lock() {
-                if let Some(path) = path_guard.take() {
-                    let _ = std::fs::remove_file(&path);
+            .map_err(|e| format!("Failed to acquire recorder lock: {}", e))
+            .and_then(|mut recorder| {
+                if recorder.is_recording() {
+                    recorder.stop_recording()
+                } else {
+                    Ok(String::new())
                 }
-            }
+            });
 
-            update_recording_state(&app, RecordingState::Idle, None);
-            return Err(PTT_START_ABORTED_AFTER_RELEASE.to_string());
+        clear_pending_stop_after_start(&app_state);
+        MEDIA_CONTROLLER.resume_if_we_paused();
+        stop_result?;
+
+        // Clean up the audio file
+        if let Ok(mut path_guard) = app_state.current_recording_path.lock() {
+            if let Some(path) = path_guard.take() {
+                let _ = std::fs::remove_file(&path);
+            }
         }
+
+        update_recording_state(&app, RecordingState::Idle, None);
+        return Err(PTT_START_ABORTED_AFTER_RELEASE.to_string());
     }
 
     // Update state to recording
