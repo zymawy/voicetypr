@@ -46,7 +46,7 @@ fn ensure_trailing_sentence_space(text: &str) -> String {
         return text.to_string();
     }
 
-    let closing_punctuation = ['"', '\'', '”', '’', ')', ']', '}'];
+    let closing_punctuation = ['"', '\'', '“', '”', '’', ')', ']', '}'];
     let sentence_end = without_trailing_spaces
         .chars()
         .rev()
@@ -625,6 +625,14 @@ mod tests {
         assert_eq!(
             ensure_trailing_sentence_space("He said \"yes.\""),
             "He said \"yes.\" "
+        );
+    }
+
+    #[test]
+    fn curly_closing_quote_gets_trailing_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("He said “yes.”"),
+            "He said “yes.” "
         );
     }
 

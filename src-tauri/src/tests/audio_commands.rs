@@ -372,17 +372,10 @@ mod tests {
             .ptt_key_held
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
-        // Guard check: mode is PTT and key is not held
-        let mode = app_state
-            .recording_mode
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(crate::RecordingMode::Toggle);
-        let should_abort = mode == crate::RecordingMode::PushToTalk
-            && !app_state
-                .ptt_key_held
-                .load(std::sync::atomic::Ordering::SeqCst);
-        assert!(should_abort, "PTT guard should abort when key is not held");
+        assert!(
+            crate::commands::audio::ptt_key_released(&app_state),
+            "PTT guard should abort when key is not held"
+        );
     }
 
     #[test]
@@ -424,17 +417,8 @@ mod tests {
             .ptt_key_held
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let mode = app_state
-            .recording_mode
-            .lock()
-            .map(|g| *g)
-            .unwrap_or(crate::RecordingMode::Toggle);
-        let should_abort = mode == crate::RecordingMode::PushToTalk
-            && !app_state
-                .ptt_key_held
-                .load(std::sync::atomic::Ordering::SeqCst);
         assert!(
-            !should_abort,
+            !crate::commands::audio::ptt_key_released(&app_state),
             "PTT guard should NOT abort when key is still held"
         );
     }
@@ -455,12 +439,10 @@ mod tests {
             .unwrap_or(crate::RecordingMode::Toggle);
         assert_eq!(mode, crate::RecordingMode::Toggle);
 
-        // In toggle mode, the PTT guard should not trigger even if key is not held
-        let should_abort = mode == crate::RecordingMode::PushToTalk
-            && !app_state
-                .ptt_key_held
-                .load(std::sync::atomic::Ordering::SeqCst);
-        assert!(!should_abort, "PTT guard should not affect toggle mode");
+        assert!(
+            !crate::commands::audio::ptt_key_released(&app_state),
+            "PTT guard should not affect toggle mode"
+        );
     }
 
     #[test]

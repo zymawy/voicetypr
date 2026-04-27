@@ -1137,14 +1137,28 @@ pub async fn start_recording(
 
         clear_pending_stop_after_start(&app_state);
         MEDIA_CONTROLLER.resume_if_we_paused();
-        stop_result?;
+
+        let cleanup_recording_path = || {
+            if let Ok(mut path_guard) = app_state.current_recording_path.lock() {
+                if let Some(path) = path_guard.take() {
+                    if let Err(error) = std::fs::remove_file(&path) {
+                        log::warn!(
+                            "Failed to remove aborted recording file {}: {}",
+                            path.display(),
+                            error
+                        );
+                    }
+                }
+            }
+        };
+
+        if let Err(error) = stop_result {
+            cleanup_recording_path();
+            return Err(error);
+        }
 
         // Clean up the audio file
-        if let Ok(mut path_guard) = app_state.current_recording_path.lock() {
-            if let Some(path) = path_guard.take() {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
+        cleanup_recording_path();
 
         update_recording_state(&app, RecordingState::Idle, None);
         return Err(PTT_START_ABORTED_AFTER_RELEASE.to_string());

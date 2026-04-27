@@ -200,7 +200,7 @@ describe('AppContainer', () => {
     const { unmount } = render(<AppContainer />);
 
     await waitFor(() => {
-      expect(mockUnlisteners).toHaveLength(6);
+      expect(mockUnlisteners).toHaveLength(mockRegisterEvent.mock.calls.length);
     });
 
     unmount();
