@@ -2061,32 +2061,59 @@ pub async fn stop_recording(
                     // Reduced delay to ensure UI is stable (was 100ms, now 50ms)
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-                    // Now handle text insertion with stable UI
-                    match crate::commands::text::insert_text(
-                        app_for_process.clone(),
-                        final_text.clone(),
-                    )
-                    .await
-                    {
-                        Ok(_) => log::debug!("Text inserted at cursor successfully"),
-                        Err(e) => {
-                            log::error!("Failed to insert text: {}", e);
+                    // Now handle text insertion or clipboard copy based on auto_paste_transcription.
+                    // Missing setting keys default inside get_settings; actual settings-read failures fail closed
+                    // to avoid surprising paste into the wrong app.
+                    let auto_paste = match get_settings(app_for_process.clone()).await {
+                        Ok(settings) => settings.auto_paste_transcription,
+                        Err(error) => {
+                            log::error!("Failed to read auto-paste setting: {}", error);
+                            false
+                        }
+                    };
 
-                            // Check if it's an accessibility permission issue
-                            if e.contains("accessibility") || e.contains("permission") {
-                                // Show pill toast for accessibility permission error
-                                pill_toast(
-                                    &app_for_process,
-                                    "Text copied - grant permission to auto-paste",
-                                    1500,
-                                );
-                            } else {
-                                // Generic paste error
-                                pill_toast(
-                                    &app_for_process,
-                                    "Paste failed - text in clipboard",
-                                    1500,
-                                );
+                    if auto_paste {
+                        // Auto-paste enabled: insert text at cursor
+                        match crate::commands::text::insert_text(
+                            app_for_process.clone(),
+                            final_text.clone(),
+                        )
+                        .await
+                        {
+                            Ok(_) => log::debug!("Text inserted at cursor successfully"),
+                            Err(e) => {
+                                log::error!("Failed to insert text: {}", e);
+
+                                // Check if it's an accessibility permission issue
+                                if e.contains("accessibility") || e.contains("permission") {
+                                    // Show pill toast for accessibility permission error
+                                    pill_toast(
+                                        &app_for_process,
+                                        "Text copied - grant permission to auto-paste",
+                                        1500,
+                                    );
+                                } else {
+                                    // Generic paste error
+                                    pill_toast(
+                                        &app_for_process,
+                                        "Paste failed - text in clipboard",
+                                        1500,
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Auto-paste disabled: copy to clipboard and notify
+                        match crate::commands::text::copy_text_to_clipboard(final_text.clone())
+                            .await
+                        {
+                            Ok(_) => {
+                                log::debug!("Text copied to clipboard (auto-paste disabled)");
+                                pill_toast(&app_for_process, "Transcription copied", 1500);
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy text to clipboard: {}", e);
+                                pill_toast(&app_for_process, "Copy failed", 1500);
                             }
                         }
                     }

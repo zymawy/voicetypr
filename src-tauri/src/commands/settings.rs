@@ -45,6 +45,8 @@ pub struct Settings {
     pub pill_indicator_offset: u32,
     // Pause system media during recording
     pub pause_media_during_recording: bool,
+    // Automatically paste transcription text into the active window
+    pub auto_paste_transcription: bool,
 }
 
 impl Default for Settings {
@@ -72,6 +74,7 @@ impl Default for Settings {
             pill_indicator_position: "bottom-center".to_string(), // Default to bottom center of screen
             pill_indicator_offset: DEFAULT_INDICATOR_OFFSET,
             pause_media_during_recording: !cfg!(target_os = "macos"),
+            auto_paste_transcription: true, // Default to auto-pasting transcription
         }
     }
 }
@@ -243,6 +246,10 @@ pub async fn get_settings(app: AppHandle) -> Result<Settings, String> {
             .get("pause_media_during_recording")
             .and_then(|v| v.as_bool())
             .unwrap_or_else(|| Settings::default().pause_media_during_recording),
+        auto_paste_transcription: store
+            .get("auto_paste_transcription")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| Settings::default().auto_paste_transcription),
     };
 
     Ok(settings)
@@ -336,6 +343,10 @@ pub async fn save_settings(app: AppHandle, settings: Settings) -> Result<(), Str
     store.set(
         "pause_media_during_recording",
         json!(settings.pause_media_during_recording),
+    );
+    store.set(
+        "auto_paste_transcription",
+        json!(settings.auto_paste_transcription),
     );
 
     // Save pill position if provided
