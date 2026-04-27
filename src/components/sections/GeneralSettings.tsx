@@ -328,6 +328,29 @@ export function GeneralSettings() {
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
                   <Label
+                    htmlFor="auto-paste-transcription"
+                    className="text-sm font-medium"
+                  >
+                    Auto-Paste Transcript
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    Insert completed text automatically; turn off to copy for manual paste
+                  </p>
+                </div>
+                <Switch
+                  id="auto-paste-transcription"
+                  checked={settings.auto_paste_transcription ?? true}
+                  onCheckedChange={async (checked) =>
+                    await updateSettings({
+                      auto_paste_transcription: checked,
+                    })
+                  }
+                />
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label
                     htmlFor="sound-on-recording"
                     className="text-sm font-medium"
                   >

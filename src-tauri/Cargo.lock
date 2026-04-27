@@ -7674,7 +7674,7 @@ dependencies = [
 
 [[package]]
 name = "voicetypr"
-version = "1.12.1"
+version = "1.12.2"
 dependencies = [
  "aes-gcm",
  "arboard",
