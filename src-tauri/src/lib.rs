@@ -15,9 +15,10 @@ use crate::utils::logger::*;
 mod ai;
 mod audio;
 mod commands;
+mod device_id;
 mod ffmpeg;
-mod license;
 mod media;
+mod meetings;
 mod menu;
 mod parakeet;
 mod recognition;
@@ -50,17 +51,22 @@ use audio::recorder::AudioRecorder;
 use commands::{
     ai::{
         cache_ai_api_key, clear_ai_api_key_cache, disable_ai_enhancement, enhance_transcription,
-        get_ai_settings, get_ai_settings_for_provider, get_enhancement_options, get_openai_config,
-        list_provider_models, set_openai_config, test_openai_endpoint, update_ai_settings,
-        update_enhancement_options, validate_and_cache_api_key,
+        get_ai_settings, get_ai_settings_for_provider, get_custom_instructions,
+        get_enhancement_options, get_openai_config, list_provider_models, set_openai_config,
+        test_openai_endpoint, update_ai_settings, update_custom_instructions,
+        update_custom_vocabulary, update_enhancement_options, validate_and_cache_api_key,
+        rephrase_selected_text, get_rephrase_settings, update_rephrase_settings,
     },
     audio::*,
     clipboard::{copy_image_to_clipboard, save_image_to_file},
     debug::{debug_transcription_flow, test_transcription_event},
     device::get_device_id,
     keyring::{keyring_delete, keyring_get, keyring_has, keyring_set},
-    license::*,
     logs::{clear_old_logs, get_log_directory, open_logs_folder},
+    meetings::{
+        delete_meeting, get_meeting, list_meetings, rename_meeting, start_meeting, stop_meeting,
+        summarize_meeting,
+    },
     model::{
         cancel_download, delete_model, download_model, get_model_status, list_downloaded_models,
         preload_model, verify_model,
@@ -359,6 +365,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Cache size is 1: only the current model (1-3GB RAM)
             // When user switches models, old one is unloaded immediately
             app.manage(AsyncMutex::new(TranscriberCache::new()));
+
+            // Meetings sessions registry
+            app.manage(meetings::new_sessions_state());
 
             // Initialize unified application state
             app.manage(AppState::new());
@@ -824,6 +833,87 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // Register rephrase hotkey (use default if not configured)
+            {
+                let rephrase_key = app.store("settings").ok()
+                    .and_then(|store| store.get("rephrase_hotkey").and_then(|v| v.as_str().map(|s| s.to_string())))
+                    .unwrap_or_else(|| "CommandOrControl+Shift+.".to_string());
+
+                log::info!("✂️  Registering rephrase hotkey: {}", rephrase_key);
+
+                    let normalized_rephrase =
+                        crate::commands::key_normalizer::normalize_shortcut_keys(&rephrase_key);
+
+                    match normalized_rephrase.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+                        Ok(rephrase_shortcut) => {
+                            let app_handle_rephrase = app.app_handle().clone();
+                            match app.global_shortcut().on_shortcut(
+                                rephrase_shortcut,
+                                move |_app, _shortcut, event| {
+                                    // Only trigger on key press, not release
+                                    if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                                        return;
+                                    }
+                                    let app_clone = app_handle_rephrase.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        // Load rephrase style from settings
+                                        let (style, custom_instructions) = if let Ok(s) =
+                                            app_clone.store("settings")
+                                        {
+                                            let st = s
+                                                .get("rephrase_style")
+                                                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                                .unwrap_or_else(|| "Professional".to_string());
+                                            let ci = s
+                                                .get("rephrase_custom_instructions")
+                                                .and_then(|v| v.as_str().map(|s| s.to_string()));
+                                            (st, ci)
+                                        } else {
+                                            ("Professional".to_string(), None)
+                                        };
+
+                                        match crate::commands::ai::rephrase_selected_text_inner(
+                                            app_clone,
+                                            style,
+                                            custom_instructions,
+                                        )
+                                        .await
+                                        {
+                                            Ok(result) => {
+                                                log::info!(
+                                                    "Rephrase hotkey: rephrased {} -> {} chars",
+                                                    result.original_text.len(),
+                                                    result.rephrased_text.len()
+                                                );
+                                            }
+                                            Err(e) => {
+                                                log::error!("Rephrase hotkey failed: {}", e);
+                                            }
+                                        }
+                                    });
+                                },
+                            ) {
+                                Ok(_) => {
+                                    log::info!(
+                                        "✅ Successfully registered rephrase hotkey: {}",
+                                        rephrase_key
+                                    );
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "❌ Failed to register rephrase hotkey '{}': {}",
+                                        rephrase_key,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Invalid rephrase hotkey format '{}': {}", rephrase_key, e);
+                        }
+                    }
+            }
+
             // Preload current model if set (graceful degradation)
             // Use Tauri's async runtime which is available after setup
             if let Ok(store) = app.store("settings") {
@@ -1078,12 +1168,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             check_microphone_permission,
             request_microphone_permission,
             test_automation_permission,
-            check_license_status,
-            restore_license,
-            activate_license,
-            deactivate_license,
-            open_purchase_page,
-            invalidate_license_cache,
             reset_app_data,
             copy_image_to_clipboard,
             save_image_to_file,
@@ -1101,7 +1185,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             disable_ai_enhancement,
             get_enhancement_options,
             update_enhancement_options,
+            get_custom_instructions,
+            update_custom_instructions,
+            update_custom_vocabulary,
             list_provider_models,
+            rephrase_selected_text,
+            get_rephrase_settings,
+            update_rephrase_settings,
             keyring_set,
             keyring_get,
             keyring_delete,
@@ -1113,6 +1203,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             get_autostart_status,
             set_autostart,
             get_device_id,
+            start_meeting,
+            stop_meeting,
+            summarize_meeting,
+            list_meetings,
+            get_meeting,
+            delete_meeting,
+            rename_meeting,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

@@ -716,13 +716,30 @@ pub async fn disable_ai_enhancement(app: tauri::AppHandle) -> Result<(), String>
 pub async fn get_enhancement_options(app: tauri::AppHandle) -> Result<EnhancementOptions, String> {
     let store = app.store("settings").map_err(|e| e.to_string())?;
 
-    // Load from store or return defaults
-    if let Some(options_value) = store.get("enhancement_options") {
-        serde_json::from_value(options_value.clone())
-            .map_err(|e| format!("Failed to parse enhancement options: {}", e))
+    // Load base options from store or use defaults
+    let mut options = if let Some(options_value) = store.get("enhancement_options") {
+        serde_json::from_value::<EnhancementOptions>(options_value.clone())
+            .unwrap_or_default()
     } else {
-        Ok(EnhancementOptions::default())
+        EnhancementOptions::default()
+    };
+
+    // Load custom instructions from dedicated key
+    if let Some(instructions) = store
+        .get("ai_custom_instructions")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+    {
+        options.custom_instructions = Some(instructions);
     }
+
+    // Load custom vocabulary from dedicated key
+    if let Some(vocab_value) = store.get("ai_custom_vocabulary") {
+        if let Ok(vocab) = serde_json::from_value::<Vec<String>>(vocab_value.clone()) {
+            options.custom_vocabulary = vocab;
+        }
+    }
+
+    Ok(options)
 }
 
 #[tauri::command]
@@ -732,11 +749,13 @@ pub async fn update_enhancement_options(
 ) -> Result<(), String> {
     let store = app.store("settings").map_err(|e| e.to_string())?;
 
-    store.set(
-        "enhancement_options",
-        serde_json::to_value(&options)
-            .map_err(|e| format!("Failed to serialize options: {}", e))?,
-    );
+    // Only persist the preset in the enhancement_options blob.
+    // custom_instructions and custom_vocabulary are stored in dedicated keys.
+    let store_value = serde_json::json!({
+        "preset": options.preset,
+    });
+
+    store.set("enhancement_options", store_value);
 
     store
         .save()
@@ -946,6 +965,66 @@ pub async fn enhance_transcription(text: String, app: tauri::AppHandle) -> Resul
     }
 }
 
+#[tauri::command]
+pub async fn get_custom_instructions(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let store = app.store("settings").map_err(|e| e.to_string())?;
+    Ok(store
+        .get("ai_custom_instructions")
+        .and_then(|v| v.as_str().map(|s| s.to_string())))
+}
+
+#[tauri::command]
+pub async fn update_custom_instructions(
+    instructions: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let store = app.store("settings").map_err(|e| e.to_string())?;
+
+    match instructions {
+        Some(ref text) if !text.trim().is_empty() => {
+            store.set(
+                "ai_custom_instructions",
+                serde_json::Value::String(text.clone()),
+            );
+        }
+        _ => {
+            store.delete("ai_custom_instructions");
+        }
+    }
+
+    store
+        .save()
+        .map_err(|e| format!("Failed to save custom instructions: {}", e))?;
+
+    log::info!("Custom instructions updated");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn update_custom_vocabulary(
+    vocabulary: Vec<String>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let store = app.store("settings").map_err(|e| e.to_string())?;
+
+    if vocabulary.is_empty() {
+        store.delete("ai_custom_vocabulary");
+    } else {
+        store.set(
+            "ai_custom_vocabulary",
+            serde_json::to_value(&vocabulary)
+                .map_err(|e| format!("Failed to serialize vocabulary: {}", e))?,
+        );
+    }
+
+    store
+        .save()
+        .map_err(|e| format!("Failed to save custom vocabulary: {}", e))?;
+
+    log::info!("Custom vocabulary updated: {} terms", vocabulary.len());
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OpenAIConfig {
     #[serde(rename = "baseUrl")]
@@ -1074,6 +1153,558 @@ pub async fn list_provider_models(
     );
 
     Ok(models)
+}
+
+// ============================================================================
+// Rephrase Selected Text Feature
+// ============================================================================
+
+/// Result returned from the `rephrase_selected_text` command
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RephraseResult {
+    pub original_text: String,
+    pub rephrased_text: String,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Build the AI provider config by reading the settings store and cache.
+/// Extracted as a helper so both `enhance_transcription` and `rephrase_selected_text`
+/// can share the same provider-resolution logic without duplication.
+async fn build_ai_provider_config(
+    app: &tauri::AppHandle,
+) -> Result<(AIProviderConfig, String), String> {
+    build_ai_provider_config_inner(app, true).await
+}
+
+/// Build AI provider config, optionally requiring ai_enabled to be true.
+/// Rephrase uses `require_enabled = false` so it works even when voice
+/// enhancement is toggled off.
+pub(crate) async fn build_ai_provider_config_inner(
+    app: &tauri::AppHandle,
+    require_enabled: bool,
+) -> Result<(AIProviderConfig, String), String> {
+    let store = app.store("settings").map_err(|e| e.to_string())?;
+
+    if require_enabled {
+        let enabled = store
+            .get("ai_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !enabled {
+            return Err("AI enhancement is not enabled".to_string());
+        }
+    }
+
+    let provider = store
+        .get("ai_provider")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let model = store
+        .get("ai_model")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    if model.is_empty() || provider.is_empty() {
+        return Err("No AI model or provider configured".to_string());
+    }
+
+    let (factory_provider, api_key, options) = if provider == "openai" {
+        let cache = API_KEY_CACHE
+            .lock()
+            .map_err(|_| "Failed to access cache".to_string())?;
+        let openai_cached = cache.get("ai_api_key_openai").cloned();
+        let custom_cached = cache.get("ai_api_key_custom").cloned();
+        drop(cache);
+
+        if let Some(cached) = openai_cached {
+            let mut opts = std::collections::HashMap::new();
+            opts.insert(
+                "base_url".into(),
+                serde_json::Value::String(DEFAULT_OPENAI_BASE_URL.to_string()),
+            );
+            opts.insert("no_auth".into(), serde_json::Value::Bool(false));
+            ("openai".to_string(), cached, opts)
+        } else if let Some(legacy_base_url) = store
+            .get(LEGACY_OPENAI_BASE_URL_KEY)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+        {
+            let mut opts = std::collections::HashMap::new();
+            opts.insert(
+                "base_url".into(),
+                serde_json::Value::String(legacy_base_url),
+            );
+            opts.insert(
+                "no_auth".into(),
+                serde_json::Value::Bool(custom_cached.is_none()),
+            );
+            (
+                "openai".to_string(),
+                custom_cached.unwrap_or_default(),
+                opts,
+            )
+        } else {
+            return Err("API key not found in cache".to_string());
+        }
+    } else if provider == "custom" {
+        let base_url = store
+            .get(CUSTOM_BASE_URL_KEY)
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .or_else(|| {
+                store
+                    .get(LEGACY_OPENAI_BASE_URL_KEY)
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+            })
+            .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
+
+        let cache = API_KEY_CACHE
+            .lock()
+            .map_err(|_| "Failed to access cache".to_string())?;
+        let cached = cache.get("ai_api_key_custom").cloned();
+        drop(cache);
+
+        let mut opts = std::collections::HashMap::new();
+        opts.insert("base_url".into(), serde_json::Value::String(base_url));
+        opts.insert("no_auth".into(), serde_json::Value::Bool(cached.is_none()));
+
+        ("openai".to_string(), cached.unwrap_or_default(), opts)
+    } else if provider == "gemini" {
+        let cache = API_KEY_CACHE
+            .lock()
+            .map_err(|_| "Failed to access cache".to_string())?;
+        let key_name = format!("ai_api_key_{}", provider);
+        let api_key = cache
+            .get(&key_name)
+            .cloned()
+            .ok_or_else(|| "API key not found in cache".to_string())?;
+        drop(cache);
+        (provider.clone(), api_key, std::collections::HashMap::new())
+    } else {
+        return Err("Unsupported provider".to_string());
+    };
+
+    drop(store);
+
+    let config = AIProviderConfig {
+        provider: factory_provider,
+        model: model.clone(),
+        api_key,
+        enabled: true,
+        options,
+    };
+
+    Ok((config, model))
+}
+
+/// Simulate Cmd+C (macOS) or Ctrl+C (Windows/Linux) to copy selected text to the clipboard.
+fn simulate_copy() -> Result<(), String> {
+    use rdev::{simulate, EventType, Key as RdevKey};
+    use std::thread;
+    use std::time::Duration;
+
+    thread::sleep(Duration::from_millis(50));
+
+    #[cfg(target_os = "macos")]
+    {
+        simulate(&EventType::KeyPress(RdevKey::MetaLeft))
+            .map_err(|e| format!("Failed to press Meta: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyPress(RdevKey::KeyC))
+            .map_err(|e| format!("Failed to press C: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyRelease(RdevKey::KeyC))
+            .map_err(|e| format!("Failed to release C: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyRelease(RdevKey::MetaLeft))
+            .map_err(|e| format!("Failed to release Meta: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        simulate(&EventType::KeyPress(RdevKey::ControlLeft))
+            .map_err(|e| format!("Failed to press Control: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyPress(RdevKey::KeyC))
+            .map_err(|e| format!("Failed to press C: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyRelease(RdevKey::KeyC))
+            .map_err(|e| format!("Failed to release C: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyRelease(RdevKey::ControlLeft))
+            .map_err(|e| format!("Failed to release Control: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Ok(())
+}
+
+/// Copy text to clipboard then simulate paste (Cmd/Ctrl+V) to insert rephrased text.
+fn replace_with_clipboard(rephrased: &str) -> Result<(), String> {
+    use arboard::Clipboard;
+    use std::thread;
+    use std::time::Duration;
+
+    let mut clipboard =
+        Clipboard::new().map_err(|e| format!("Failed to initialize clipboard: {}", e))?;
+
+    clipboard
+        .set_text(rephrased)
+        .map_err(|e| format!("Failed to set clipboard: {}", e))?;
+
+    thread::sleep(Duration::from_millis(50));
+
+    // Reuse the rdev paste pattern from text.rs via a direct simulation here
+    use rdev::{simulate, EventType, Key as RdevKey};
+
+    #[cfg(target_os = "macos")]
+    {
+        simulate(&EventType::KeyPress(RdevKey::MetaLeft))
+            .map_err(|e| format!("Failed to press Meta: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyPress(RdevKey::KeyV))
+            .map_err(|e| format!("Failed to press V: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyRelease(RdevKey::KeyV))
+            .map_err(|e| format!("Failed to release V: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyRelease(RdevKey::MetaLeft))
+            .map_err(|e| format!("Failed to release Meta: {:?}", e))?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        simulate(&EventType::KeyPress(RdevKey::ControlLeft))
+            .map_err(|e| format!("Failed to press Control: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyPress(RdevKey::KeyV))
+            .map_err(|e| format!("Failed to press V: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyRelease(RdevKey::KeyV))
+            .map_err(|e| format!("Failed to release V: {:?}", e))?;
+        thread::sleep(Duration::from_millis(50));
+        simulate(&EventType::KeyRelease(RdevKey::ControlLeft))
+            .map_err(|e| format!("Failed to release Control: {:?}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Call an AI provider with a raw, pre-built prompt as the user message.
+///
+/// Unlike `AIProvider::enhance_text`, this function does NOT wrap the input with
+/// `build_enhancement_prompt` — the caller is responsible for the full prompt content.
+/// Supports OpenAI-compatible providers (openai / custom) and Gemini.
+pub(crate) async fn call_ai_with_raw_prompt(config: &AIProviderConfig, prompt: &str) -> Result<String, String> {
+    match config.provider.as_str() {
+        "openai" => {
+            let base_root = config
+                .options
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("https://api.openai.com/v1");
+            let base_url = format!(
+                "{}/chat/completions",
+                base_root.trim_end_matches('/')
+            );
+            let no_auth = config
+                .options
+                .get("no_auth")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let use_max_completion_tokens =
+                crate::ai::openai::model_uses_max_completion_tokens(&config.model);
+
+            let payload = if use_max_completion_tokens {
+                serde_json::json!({
+                    "model": config.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_completion_tokens": 4096_u32,
+                })
+            } else {
+                serde_json::json!({
+                    "model": config.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 4096_u32,
+                    "temperature": 0.3_f32,
+                })
+            };
+
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+            let mut req = client
+                .post(&base_url)
+                .header("Content-Type", "application/json")
+                .json(&payload);
+
+            if !no_auth && !config.api_key.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", config.api_key));
+            }
+
+            let response = req
+                .send()
+                .await
+                .map_err(|e| format!("Network error: {}", e))?;
+
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "No body".to_string());
+
+            if !status.is_success() {
+                return Err(format!("AI API returned {}: {}", status, &body[..body.len().min(300)]));
+            }
+
+            let json: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| format!("Failed to parse response: {}", e))?;
+
+            json.pointer("/choices/0/message/content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "Empty or missing response content".to_string())
+        }
+        "gemini" => {
+            // Direct Gemini API call using generativelanguage.googleapis.com REST API
+            let model = &config.model;
+            let api_key = &config.api_key;
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                model
+            );
+
+            let payload = serde_json::json!({
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.3_f32,
+                    "maxOutputTokens": 4096_u32,
+                }
+            });
+
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+            let response = client
+                .post(&url)
+                .header("x-goog-api-key", api_key)
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| format!("Network error: {}", e))?;
+
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "No body".to_string());
+
+            if !status.is_success() {
+                return Err(format!("Gemini API returned {}: {}", status, &body[..body.len().min(300)]));
+            }
+
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| format!("Failed to parse Gemini response: {}", e))?;
+
+            json.pointer("/candidates/0/content/parts/0/text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "Empty or missing Gemini response content".to_string())
+        }
+        other => Err(format!("Unsupported provider for rephrase: {}", other)),
+    }
+}
+
+/// Copy selected text in the frontmost application, rephrase it using AI,
+/// then paste the result back in place.
+#[tauri::command]
+pub async fn rephrase_selected_text(
+    app: tauri::AppHandle,
+    style: String,
+    custom_instructions: Option<String>,
+) -> Result<RephraseResult, String> {
+    rephrase_selected_text_inner(app, style, custom_instructions).await
+}
+
+/// Core rephrase logic, callable from both the Tauri command and the hotkey handler.
+pub async fn rephrase_selected_text_inner(
+    app: tauri::AppHandle,
+    style: String,
+    custom_instructions: Option<String>,
+) -> Result<RephraseResult, String> {
+    use crate::ai::prompts::{build_rephrase_prompt, RephraseStyle};
+    use arboard::Clipboard;
+
+    // Parse and validate the requested style
+    let rephrase_style: RephraseStyle = style
+        .parse()
+        .map_err(|e: String| format!("Invalid rephrase style: {}", e))?;
+
+    log::info!("Rephrase requested with style: {:?}", rephrase_style);
+
+    // Show "Rephrasing..." pill toast
+    pill_toast(&app, "Rephrasing...", 5000);
+
+    // 1. Simulate copy to get selected text
+    let original_text = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        // Small pause so the hotkey release doesn't interfere
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        simulate_copy()?;
+
+        // Wait for clipboard to be updated
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        let mut clipboard = Clipboard::new()
+            .map_err(|e| format!("Failed to initialize clipboard: {}", e))?;
+
+        clipboard
+            .get_text()
+            .map_err(|e| format!("Failed to read clipboard: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))??;
+
+    if original_text.trim().is_empty() {
+        let msg = "No text selected — please highlight text first";
+        log::warn!("{}", msg);
+        pill_toast(&app, msg, 2000);
+        return Err(msg.to_string());
+    }
+
+    log::info!("Captured {} chars for rephrasing", original_text.len());
+
+    // 2. Build AI provider config from settings
+    let (config, model) = build_ai_provider_config_inner(&app, false).await.map_err(|e| {
+        log::error!("Failed to build AI provider config: {}", e);
+        pill_toast(&app, "AI not configured", 2000);
+        e
+    })?;
+
+    let provider_name = config.provider.clone();
+
+    // 3. Build the rephrase prompt
+    let language = {
+        let lang_store = app.store("settings").map_err(|e| e.to_string())?;
+        lang_store
+            .get("language")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+    };
+
+    let prompt = build_rephrase_prompt(
+        &original_text,
+        &rephrase_style,
+        custom_instructions.as_deref(),
+        language.as_deref(),
+    );
+
+    // 4. Call AI directly so we can pass the pre-built rephrase prompt verbatim
+    // (the AIProvider::enhance_text path always rewraps with build_enhancement_prompt,
+    //  which adds voice-transcript-specific instructions we don't want here).
+    let rephrased = call_ai_with_raw_prompt(&config, &prompt).await.map_err(|e| {
+        log::error!("Rephrase AI call failed: {}", e);
+        pill_toast(&app, "Rephrase failed", 2000);
+        e
+    })?;
+
+    log::info!(
+        "Rephrase complete: {} -> {} chars",
+        original_text.len(),
+        rephrased.len()
+    );
+
+    // 5. Paste rephrased text back
+    let rephrased_for_paste = rephrased.clone();
+    tokio::task::spawn_blocking(move || replace_with_clipboard(&rephrased_for_paste))
+        .await
+        .map_err(|e| format!("Task failed: {}", e))?
+        .map_err(|e| {
+            log::error!("Failed to paste rephrased text: {}", e);
+            e
+        })?;
+
+    // 6. Show success toast
+    pill_toast(&app, "Text rephrased!", 1500);
+
+    Ok(RephraseResult {
+        original_text,
+        rephrased_text: rephrased,
+        provider: provider_name,
+        model,
+    })
+}
+
+/// Get rephrase-specific settings (style + custom instructions)
+#[tauri::command]
+pub async fn get_rephrase_settings(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let store = app.store("settings").map_err(|e| e.to_string())?;
+
+    let style = store
+        .get("rephrase_style")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "Professional".to_string());
+
+    let custom_instructions = store
+        .get("rephrase_custom_instructions")
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
+
+    let hotkey = store
+        .get("rephrase_hotkey")
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
+
+    Ok(serde_json::json!({
+        "style": style,
+        "customInstructions": custom_instructions,
+        "hotkey": hotkey,
+    }))
+}
+
+/// Persist rephrase style and optional custom instructions
+#[tauri::command]
+pub async fn update_rephrase_settings(
+    app: tauri::AppHandle,
+    style: String,
+    custom_instructions: Option<String>,
+) -> Result<(), String> {
+    use crate::ai::prompts::RephraseStyle;
+
+    // Validate the style string before saving
+    let _: RephraseStyle = style
+        .parse()
+        .map_err(|e: String| format!("Invalid rephrase style: {}", e))?;
+
+    let store = app.store("settings").map_err(|e| e.to_string())?;
+
+    store.set("rephrase_style", serde_json::Value::String(style.clone()));
+
+    match custom_instructions {
+        Some(ref text) if !text.trim().is_empty() => {
+            store.set(
+                "rephrase_custom_instructions",
+                serde_json::Value::String(text.clone()),
+            );
+        }
+        _ => {
+            store.delete("rephrase_custom_instructions");
+        }
+    }
+
+    store
+        .save()
+        .map_err(|e| format!("Failed to save rephrase settings: {}", e))?;
+
+    log::info!("Rephrase settings updated: style={}", style);
+    Ok(())
 }
 
 #[cfg(test)]

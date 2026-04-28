@@ -46,7 +46,6 @@ export function useReadinessState() {
     has_microphone_permission: context.hasMicrophonePermission,
     has_models: context.hasModels,
     selected_model_available: context.selectedModelAvailable,
-    license_valid: context.licenseValid,
     ai_ready: false // This would need to be computed based on AI settings
   };
 }
