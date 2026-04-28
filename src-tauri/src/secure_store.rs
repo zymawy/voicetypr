@@ -1,4 +1,4 @@
-use crate::license::device;
+use crate::device_id;
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
@@ -19,7 +19,7 @@ pub fn initialize_encryption_key() -> Result<(), String> {
     ENCRYPTION_KEY
         .get_or_try_init(|| {
             // Get the same device hash used for API authentication
-            let device_hash = device::get_device_hash()?;
+            let device_hash = device_id::get_device_hash()?;
 
             // Validate device hash has sufficient entropy
             // SHA256 produces 64 hex chars, we need at least that

@@ -50,7 +50,6 @@ pub struct AppState {
     pub window_manager: Arc<Mutex<Option<WindowManager>>>,
     pub recording_config_cache:
         Arc<tokio::sync::RwLock<Option<crate::commands::audio::RecordingConfig>>>,
-    pub license_cache: Arc<tokio::sync::RwLock<Option<crate::commands::license::CachedLicense>>>,
     pub pill_event_queue: Arc<Mutex<Vec<QueuedPillEvent>>>,
     pub last_toggle_press: Arc<Mutex<Option<Instant>>>,
 }
@@ -77,7 +76,6 @@ impl AppState {
             esc_timeout_handle: Arc::new(Mutex::new(None)),
             window_manager: Arc::new(Mutex::new(None)),
             recording_config_cache: Arc::new(tokio::sync::RwLock::new(None)),
-            license_cache: Arc::new(tokio::sync::RwLock::new(None)),
             pill_event_queue: Arc::new(Mutex::new(Vec::new())),
             last_toggle_press: Arc::new(Mutex::new(None)),
         }

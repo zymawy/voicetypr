@@ -15,9 +15,10 @@ use crate::utils::logger::*;
 mod ai;
 mod audio;
 mod commands;
+mod device_id;
 mod ffmpeg;
-mod license;
 mod media;
+mod meetings;
 mod menu;
 mod parakeet;
 mod recognition;
@@ -61,8 +62,11 @@ use commands::{
     debug::{debug_transcription_flow, test_transcription_event},
     device::get_device_id,
     keyring::{keyring_delete, keyring_get, keyring_has, keyring_set},
-    license::*,
     logs::{clear_old_logs, get_log_directory, open_logs_folder},
+    meetings::{
+        delete_meeting, get_meeting, list_meetings, rename_meeting, start_meeting, stop_meeting,
+        summarize_meeting,
+    },
     model::{
         cancel_download, delete_model, download_model, get_model_status, list_downloaded_models,
         preload_model, verify_model,
@@ -361,6 +365,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Cache size is 1: only the current model (1-3GB RAM)
             // When user switches models, old one is unloaded immediately
             app.manage(AsyncMutex::new(TranscriberCache::new()));
+
+            // Meetings sessions registry
+            app.manage(meetings::new_sessions_state());
 
             // Initialize unified application state
             app.manage(AppState::new());
@@ -1161,12 +1168,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             check_microphone_permission,
             request_microphone_permission,
             test_automation_permission,
-            check_license_status,
-            restore_license,
-            activate_license,
-            deactivate_license,
-            open_purchase_page,
-            invalidate_license_cache,
             reset_app_data,
             copy_image_to_clipboard,
             save_image_to_file,
@@ -1202,6 +1203,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             get_autostart_status,
             set_autostart,
             get_device_id,
+            start_meeting,
+            stop_meeting,
+            summarize_meeting,
+            list_meetings,
+            get_meeting,
+            delete_meeting,
+            rename_meeting,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

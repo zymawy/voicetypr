@@ -95,17 +95,7 @@ pub async fn reset_app_data(app: AppHandle) -> Result<ResetResult, String> {
         }
     }
 
-    // 3. Clear license data from secure store
-    if let Err(e) = crate::secure_store::secure_delete(&app, "license") {
-        // Only push error if it's not a "store doesn't exist" error
-        if !e.contains("Store access failed") {
-            errors.push(format!("Failed to clear license: {}", e));
-        }
-    } else {
-        cleared_items.push("License data".to_string());
-    }
-
-    // 3.5. Clear the secure.dat file itself
+    // 3. Clear the secure.dat file
     if let Ok(app_data_dir) = app.path().app_data_dir() {
         let secure_store_path = app_data_dir.join("secure.dat");
         if secure_store_path.exists() {
@@ -117,7 +107,7 @@ pub async fn reset_app_data(app: AppHandle) -> Result<ResetResult, String> {
         }
     }
 
-    // 4. Clear cache data (license validation cache)
+    // 4. Clear cache data
     if let Ok(cache_dir) = app.path().cache_dir() {
         if cache_dir.exists() {
             if let Err(e) = fs::remove_dir_all(&cache_dir) {

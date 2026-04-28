@@ -8,6 +8,26 @@ set -euo pipefail
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SWIFT_DIR="$ROOT_DIR/sidecar/parakeet-swift"
 PY_DIR="$ROOT_DIR/sidecar/parakeet"
+MEETING_DIR="$ROOT_DIR/sidecar/meeting-recorder-swift"
+
+# Build meeting-recorder sidecar if present (macOS only)
+if [[ -d "$MEETING_DIR" ]]; then
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "[sidecar] Building Swift Meeting Recorder sidecar (arm64 release)..."
+    pushd "$MEETING_DIR" > /dev/null
+    swift build -c release --arch arm64
+    M_BIN_DIR=$(swift build -c release --arch arm64 --show-bin-path 2>/dev/null || echo ".build/arm64-apple-macosx/release")
+    M_SRC_BIN="$M_BIN_DIR/MeetingRecorderSidecar"
+    mkdir -p dist
+    cp "$M_SRC_BIN" "dist/meeting-recorder-aarch64-apple-darwin"
+    chmod +x "dist/meeting-recorder-aarch64-apple-darwin"
+    ln -sfn "meeting-recorder-aarch64-apple-darwin" "dist/meeting-recorder"
+    echo "[sidecar] Meeting Recorder sidecar ready at $MEETING_DIR/dist"
+    popd > /dev/null
+  else
+    echo "[sidecar] Meeting Recorder sidecar present but non-macOS host; skipping"
+  fi
+fi
 
 if [[ -d "$SWIFT_DIR" ]]; then
   # Build Swift sidecar (macOS only)

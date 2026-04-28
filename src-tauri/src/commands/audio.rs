@@ -2,9 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::audio::recorder::AudioRecorder;
-use crate::commands::license::check_license_status_internal;
 use crate::commands::settings::{get_settings, resolve_pill_indicator_mode, Settings};
-use crate::license::LicenseState;
 use crate::media::MediaPauseController;
 use crate::parakeet::messages::ParakeetResponse;
 use crate::parakeet::ParakeetManager;
@@ -579,74 +577,7 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
         );
     }
 
-    // Check license status (with caching to improve performance)
-    let license_status = {
-        let app_state = app.state::<AppState>();
-        let cache = app_state.license_cache.read().await;
-
-        if let Some(cached) = cache.as_ref() {
-            if cached.is_valid() {
-                log::debug!("Using cached license status (age: {:?})", cached.age());
-                Some(cached.status.clone())
-            } else {
-                log::debug!(
-                    "License cache is stale (age: {:?}), will refresh",
-                    cached.age()
-                );
-                None
-            }
-        } else {
-            log::debug!("No license cache found, will perform fresh check");
-            None
-        }
-    };
-
-    let status = if let Some(cached_status) = license_status {
-        cached_status
-    } else {
-        // Cache miss or stale - perform fresh license check
-        match check_license_status_internal(app).await {
-            Ok(fresh_status) => {
-                // Update cache
-                let app_state = app.state::<AppState>();
-                let mut cache = app_state.license_cache.write().await;
-                *cache = Some(crate::commands::license::CachedLicense::new(
-                    fresh_status.clone(),
-                ));
-                log::debug!("License status cached for 6 hours");
-                fresh_status
-            }
-            Err(e) => {
-                log::error!("Failed to check license status: {}", e);
-                // Allow recording if license check fails (graceful degradation)
-                return Ok(());
-            }
-        }
-    };
-
-    if matches!(status.status, LicenseState::Expired | LicenseState::None) {
-        log::error!("Invalid license: {:?}", status.status);
-
-        // Show and focus the main window
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
-
-        // Emit error event with guidance
-        let _ = emit_to_window(
-            app,
-            "main",
-            "license-required",
-            serde_json::json!({
-                "title": "License Required",
-                "message": "Your trial has expired. Please purchase a license to continue",
-                "action": "purchase"
-            }),
-        );
-        return Err("License required to record".to_string());
-    }
-
+    // License check disabled in this fork — feature is fully free.
     Ok(())
 }
 

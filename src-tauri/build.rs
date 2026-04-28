@@ -67,6 +67,35 @@ fn main() {
         println!("cargo:rerun-if-changed=../sidecar/parakeet-swift/Package.swift");
         println!("cargo:rerun-if-changed=../sidecar/parakeet-swift/build.sh");
 
+        // Build Swift Meeting Recorder sidecar
+        let meeting_dir = std::path::Path::new("../sidecar/meeting-recorder-swift");
+        let meeting_script = meeting_dir.join("build.sh");
+        if meeting_script.exists() {
+            println!("cargo:warning=Building Swift Meeting Recorder sidecar...");
+            let output = Command::new("bash")
+                .arg("build.sh")
+                .current_dir(meeting_dir)
+                .output();
+            match output {
+                Ok(output) => {
+                    if !output.status.success() {
+                        println!(
+                            "cargo:warning=Meeting Recorder sidecar build failed: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    } else {
+                        println!("cargo:warning=Meeting Recorder sidecar built successfully");
+                    }
+                }
+                Err(e) => {
+                    println!("cargo:warning=Failed to run Meeting Recorder build script: {}", e);
+                }
+            }
+        }
+        println!("cargo:rerun-if-changed=../sidecar/meeting-recorder-swift/Sources");
+        println!("cargo:rerun-if-changed=../sidecar/meeting-recorder-swift/Package.swift");
+        println!("cargo:rerun-if-changed=../sidecar/meeting-recorder-swift/build.sh");
+
         // Verify ffmpeg/ffprobe sidecars exist for macOS (aarch64)
         let ffmpeg_dir = std::path::Path::new("../sidecar/ffmpeg/dist");
         let ffmpeg = ffmpeg_dir.join("ffmpeg");

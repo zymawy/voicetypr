@@ -1180,7 +1180,7 @@ async fn build_ai_provider_config(
 /// Build AI provider config, optionally requiring ai_enabled to be true.
 /// Rephrase uses `require_enabled = false` so it works even when voice
 /// enhancement is toggled off.
-async fn build_ai_provider_config_inner(
+pub(crate) async fn build_ai_provider_config_inner(
     app: &tauri::AppHandle,
     require_enabled: bool,
 ) -> Result<(AIProviderConfig, String), String> {
@@ -1397,7 +1397,7 @@ fn replace_with_clipboard(rephrased: &str) -> Result<(), String> {
 /// Unlike `AIProvider::enhance_text`, this function does NOT wrap the input with
 /// `build_enhancement_prompt` — the caller is responsible for the full prompt content.
 /// Supports OpenAI-compatible providers (openai / custom) and Gemini.
-async fn call_ai_with_raw_prompt(config: &AIProviderConfig, prompt: &str) -> Result<String, String> {
+pub(crate) async fn call_ai_with_raw_prompt(config: &AIProviderConfig, prompt: &str) -> Result<String, String> {
     match config.provider.as_str() {
         "openai" => {
             let base_root = config
