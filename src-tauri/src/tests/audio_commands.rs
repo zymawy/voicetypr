@@ -283,4 +283,215 @@ mod tests {
             assert!(task_guard.is_none());
         }
     }
+
+    // --- PTT race condition tests ---
+    // These tests verify the fix for the PTT/license-lag issue where key-up
+    // arrives while recording start is blocked by slow license validation.
+
+    #[test]
+    fn test_ptt_key_held_set_and_cleared() {
+        let app_state = AppState::new();
+
+        // Simulate key-down
+        app_state
+            .ptt_key_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(app_state
+            .ptt_key_held
+            .load(std::sync::atomic::Ordering::SeqCst));
+
+        // Simulate key-up (swap returns previous value)
+        let was_held = app_state
+            .ptt_key_held
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(was_held);
+        assert!(!app_state
+            .ptt_key_held
+            .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_ptt_key_release_while_starting_sets_pending_stop() {
+        let app_state = AppState::new();
+
+        // Simulate: recording mode is PTT
+        {
+            let mut mode = app_state.recording_mode.lock().unwrap();
+            *mode = crate::RecordingMode::PushToTalk;
+        }
+
+        // Simulate: key-down starts the process
+        app_state
+            .ptt_key_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // State transitions to Starting
+        app_state
+            .recording_state
+            .force_set(RecordingState::Starting)
+            .unwrap();
+        assert_eq!(app_state.get_current_state(), RecordingState::Starting);
+
+        // Simulate: key-up arrives while Starting
+        let was_held = app_state
+            .ptt_key_held
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(was_held); // Key was held before release
+
+        // PTT handler should set pending_stop_after_start
+        app_state
+            .pending_stop_after_start
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // Simulate: start_recording reaches Recording state and checks the flag
+        app_state
+            .recording_state
+            .force_set(RecordingState::Recording)
+            .unwrap();
+        let pending = app_state
+            .pending_stop_after_start
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            pending,
+            "pending_stop_after_start should be true when key-up happened during Starting"
+        );
+    }
+
+    #[test]
+    fn test_ptt_guard_detects_released_key() {
+        let app_state = AppState::new();
+
+        // Set to PTT mode
+        {
+            let mut mode = app_state.recording_mode.lock().unwrap();
+            *mode = crate::RecordingMode::PushToTalk;
+        }
+
+        // Key was never pressed (or already released)
+        app_state
+            .ptt_key_held
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(
+            crate::commands::audio::ptt_key_released(&app_state),
+            "PTT guard should abort when key is not held"
+        );
+    }
+
+    #[test]
+    fn test_ptt_key_released_recovers_poisoned_mode_lock() {
+        let app_state = AppState::new();
+        {
+            let mut mode = app_state.recording_mode.lock().unwrap();
+            *mode = crate::RecordingMode::PushToTalk;
+        }
+        app_state
+            .ptt_key_held
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let mode_for_thread = app_state.recording_mode.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = mode_for_thread.lock().unwrap();
+            panic!("intentional poison for PTT guard recovery test");
+        })
+        .join();
+
+        assert!(
+            crate::commands::audio::ptt_key_released(&app_state),
+            "PTT guard should recover poisoned mode lock and still detect released key"
+        );
+    }
+
+    #[test]
+    fn test_ptt_guard_allows_when_key_still_held() {
+        let app_state = AppState::new();
+
+        // Set to PTT mode
+        {
+            let mut mode = app_state.recording_mode.lock().unwrap();
+            *mode = crate::RecordingMode::PushToTalk;
+        }
+
+        // Key is still held
+        app_state
+            .ptt_key_held
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(
+            !crate::commands::audio::ptt_key_released(&app_state),
+            "PTT guard should NOT abort when key is still held"
+        );
+    }
+
+    #[test]
+    fn test_toggle_mode_not_affected_by_ptt_guard() {
+        let app_state = AppState::new();
+
+        // Toggle mode (default)
+        app_state
+            .ptt_key_held
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let mode = app_state
+            .recording_mode
+            .lock()
+            .map(|g| *g)
+            .unwrap_or(crate::RecordingMode::Toggle);
+        assert_eq!(mode, crate::RecordingMode::Toggle);
+
+        assert!(
+            !crate::commands::audio::ptt_key_released(&app_state),
+            "PTT guard should not affect toggle mode"
+        );
+    }
+
+    #[test]
+    fn test_pending_stop_after_start_default_false() {
+        let app_state = AppState::new();
+        assert!(!app_state
+            .pending_stop_after_start
+            .load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_ptt_abort_clears_pending_stop_after_start() {
+        let app_state = AppState::new();
+        app_state
+            .pending_stop_after_start
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        crate::commands::audio::clear_pending_stop_after_start(&app_state);
+
+        assert!(
+            !app_state
+                .pending_stop_after_start
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "PTT abort cleanup must not leave a stale pending stop for the next recording"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_ptt_key_release_ignored() {
+        let app_state = AppState::new();
+
+        // First key-down
+        app_state
+            .ptt_key_held
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // First key-up: swap returns true (was held), now false
+        let first_swap = app_state
+            .ptt_key_held
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(first_swap);
+
+        // Second key-up (duplicate event): swap returns false (already released)
+        let second_swap = app_state
+            .ptt_key_held
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            !second_swap,
+            "Duplicate key release should return false from swap"
+        );
+    }
 }

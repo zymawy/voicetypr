@@ -675,10 +675,10 @@ impl WhisperManager {
 
         match sort_by {
             "speed" => {
-                models.sort_by(|a, b| b.1.speed_score.cmp(&a.1.speed_score));
+                models.sort_by_key(|(_, info)| std::cmp::Reverse(info.speed_score));
             }
             "accuracy" => {
-                models.sort_by(|a, b| b.1.accuracy_score.cmp(&a.1.accuracy_score));
+                models.sort_by_key(|(_, info)| std::cmp::Reverse(info.accuracy_score));
             }
             "balanced" => {
                 models.sort_by(|a, b| {
@@ -692,7 +692,7 @@ impl WhisperManager {
                 });
             }
             "size" => {
-                models.sort_by(|a, b| a.1.size.cmp(&b.1.size));
+                models.sort_by_key(|(_, info)| info.size);
             }
             _ => {
                 // Default: sort by balanced score

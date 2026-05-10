@@ -104,6 +104,36 @@ mod tests {
     }
 
     #[test]
+    fn test_ai_provider_factory_creates_anthropic() {
+        let config = AIProviderConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-haiku-4-5".to_string(),
+            api_key: "test_key_12345".to_string(),
+            enabled: true,
+            options: HashMap::new(),
+        };
+
+        let result = AIProviderFactory::create(&config);
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert_eq!(provider.name(), "anthropic");
+    }
+
+    #[test]
+    fn test_ai_provider_factory_rejects_unknown_anthropic_model() {
+        let config = AIProviderConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-7".to_string(), // real model, intentionally not in our curated formatting list
+            api_key: "test_key_12345".to_string(),
+            enabled: true,
+            options: HashMap::new(),
+        };
+
+        let result = AIProviderFactory::create(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_enhancement_prompt_generation() {
         use crate::ai::prompts::{build_enhancement_prompt, EnhancementOptions};
 

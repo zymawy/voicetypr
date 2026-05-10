@@ -24,6 +24,11 @@ use tauri::async_runtime::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use tauri_plugin_store::StoreExt;
 
+pub(crate) const PTT_START_ABORTED_AFTER_RELEASE: &str =
+    "PTT key released before recording could start";
+const LICENSE_CHECK_TIMEOUT_SECS: u64 = 3;
+const STALE_TRIAL_LICENSE_FALLBACK_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
 /// Atomic counter for toast IDs to prevent race conditions
 static TOAST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -547,6 +552,28 @@ fn select_best_fallback_model(
     })
 }
 
+fn cached_license_allows_recording(cached: &CachedLicense) -> bool {
+    match &cached.status.status {
+        LicenseState::Licensed => true,
+        LicenseState::Trial => {
+            // Trial fallback is intentionally short-lived: it only covers
+            // transient offline/timeout failures for a session that recently
+            // proved it still had trial time remaining. Do not extend stale
+            // trial evidence by the number of days remaining in the trial.
+            let has_trial_time_remaining = cached
+                .status
+                .trial_days_left
+                .and_then(|days| u64::try_from(days).ok())
+                .is_some_and(|days| days > 0);
+
+            has_trial_time_remaining
+                && cached.age()
+                    < std::time::Duration::from_secs(STALE_TRIAL_LICENSE_FALLBACK_MAX_AGE_SECS)
+        }
+        LicenseState::Expired | LicenseState::None => false,
+    }
+}
+
 /// Pre-recording validation using the readiness state
 async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> {
     let availability = crate::recognition_availability_snapshot(app).await;
@@ -579,6 +606,27 @@ async fn validate_recording_requirements(app: &AppHandle) -> Result<(), String> 
 
     // License check disabled in this fork — feature is fully free.
     Ok(())
+}
+
+pub(crate) fn clear_pending_stop_after_start(app_state: &AppState) {
+    app_state
+        .pending_stop_after_start
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub(crate) fn ptt_key_released(app_state: &AppState) -> bool {
+    let mode = match app_state.recording_mode.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => {
+            log::warn!("recording_mode mutex poisoned; recovering value for PTT guard");
+            *poisoned.into_inner()
+        }
+    };
+
+    mode == RecordingMode::PushToTalk
+        && !app_state
+            .ptt_key_held
+            .load(std::sync::atomic::Ordering::SeqCst)
 }
 
 #[tauri::command]
@@ -632,6 +680,17 @@ pub async fn start_recording(
                 ],
             );
             return Err(e);
+        }
+    }
+
+    // PTT guard: if recording mode is PushToTalk and the key was already released
+    // while validation was running, abort now. This prevents recording from starting
+    // after the user has already released the PTT key (e.g., during slow license checks).
+    {
+        let app_state = app.state::<AppState>();
+        if ptt_key_released(&app_state) {
+            log::info!("PTT: Key was released during validation; aborting recording start");
+            return Err(PTT_START_ABORTED_AFTER_RELEASE.to_string());
         }
     }
 
@@ -725,9 +784,7 @@ pub async fn start_recording(
 
     // Store path for later use and reset any leftover pending-toggle flag
     let app_state = app.state::<AppState>();
-    app_state
-        .pending_stop_after_start
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+    clear_pending_stop_after_start(&app_state);
 
     // Save current recording path
     match app_state.current_recording_path.lock() {
@@ -953,10 +1010,65 @@ pub async fn start_recording(
     // Clear cancellation flag for new recording
     app_state.clear_cancellation();
 
+    // Second PTT guard: check again right before committing to Recording state.
+    // Audio capture has already started; if PTT key was released between the first
+    // guard (before Starting) and now (e.g., during audio device init), stop immediately.
+    if ptt_key_released(&app_state) {
+        log::info!("PTT: Key was released during audio init; stopping recorder immediately");
+        // Stop the audio recorder synchronously before transitioning state.
+        // If this fails, do not pretend the app is idle: propagate the
+        // failure so the hotkey handler moves to Error and the recorder
+        // remains visible for recovery instead of orphaning capture.
+        let recorder_state_handle = app.state::<RecorderState>();
+        let stop_result = recorder_state_handle
+            .inner()
+            .0
+            .lock()
+            .map_err(|e| format!("Failed to acquire recorder lock: {}", e))
+            .and_then(|mut recorder| {
+                if recorder.is_recording() {
+                    recorder.stop_recording()
+                } else {
+                    Ok(String::new())
+                }
+            });
+
+        clear_pending_stop_after_start(&app_state);
+        MEDIA_CONTROLLER.resume_if_we_paused();
+
+        let cleanup_recording_path = || {
+            if let Ok(mut path_guard) = app_state.current_recording_path.lock() {
+                if let Some(path) = path_guard.take() {
+                    if let Err(error) = std::fs::remove_file(&path) {
+                        log::warn!(
+                            "Failed to remove aborted recording file {}: {}",
+                            path.display(),
+                            error
+                        );
+                    }
+                }
+            }
+        };
+
+        if let Err(error) = stop_result {
+            cleanup_recording_path();
+            return Err(error);
+        }
+
+        // Clean up the audio file
+        cleanup_recording_path();
+
+        update_recording_state(&app, RecordingState::Idle, None);
+        return Err(PTT_START_ABORTED_AFTER_RELEASE.to_string());
+    }
+
     // Update state to recording
     update_recording_state(&app, RecordingState::Recording, None);
 
-    // If a toggle-stop was requested while starting, honor it immediately after entering Recording
+    // If a stop was requested while starting (toggle or PTT), honor it immediately
+    // after entering Recording state. For PTT, key-up in Starting state sets this flag.
+    // The second PTT guard above handles key-up during audio init; this handles the
+    // narrow window between Starting transition and this point.
     if app_state
         .pending_stop_after_start
         .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -1847,32 +1959,59 @@ pub async fn stop_recording(
                     // Reduced delay to ensure UI is stable (was 100ms, now 50ms)
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-                    // Now handle text insertion with stable UI
-                    match crate::commands::text::insert_text(
-                        app_for_process.clone(),
-                        final_text.clone(),
-                    )
-                    .await
-                    {
-                        Ok(_) => log::debug!("Text inserted at cursor successfully"),
-                        Err(e) => {
-                            log::error!("Failed to insert text: {}", e);
+                    // Now handle text insertion or clipboard copy based on auto_paste_transcription.
+                    // Missing setting keys default inside get_settings; actual settings-read failures fail closed
+                    // to avoid surprising paste into the wrong app.
+                    let auto_paste = match get_settings(app_for_process.clone()).await {
+                        Ok(settings) => settings.auto_paste_transcription,
+                        Err(error) => {
+                            log::error!("Failed to read auto-paste setting: {}", error);
+                            false
+                        }
+                    };
 
-                            // Check if it's an accessibility permission issue
-                            if e.contains("accessibility") || e.contains("permission") {
-                                // Show pill toast for accessibility permission error
-                                pill_toast(
-                                    &app_for_process,
-                                    "Text copied - grant permission to auto-paste",
-                                    1500,
-                                );
-                            } else {
-                                // Generic paste error
-                                pill_toast(
-                                    &app_for_process,
-                                    "Paste failed - text in clipboard",
-                                    1500,
-                                );
+                    if auto_paste {
+                        // Auto-paste enabled: insert text at cursor
+                        match crate::commands::text::insert_text(
+                            app_for_process.clone(),
+                            final_text.clone(),
+                        )
+                        .await
+                        {
+                            Ok(_) => log::debug!("Text inserted at cursor successfully"),
+                            Err(e) => {
+                                log::error!("Failed to insert text: {}", e);
+
+                                // Check if it's an accessibility permission issue
+                                if e.contains("accessibility") || e.contains("permission") {
+                                    // Show pill toast for accessibility permission error
+                                    pill_toast(
+                                        &app_for_process,
+                                        "Text copied - grant permission to auto-paste",
+                                        1500,
+                                    );
+                                } else {
+                                    // Generic paste error
+                                    pill_toast(
+                                        &app_for_process,
+                                        "Paste failed - text in clipboard",
+                                        1500,
+                                    );
+                                }
+                            }
+                        }
+                    } else {
+                        // Auto-paste disabled: copy to clipboard and notify
+                        match crate::commands::text::copy_text_to_clipboard(final_text.clone())
+                            .await
+                        {
+                            Ok(_) => {
+                                log::debug!("Text copied to clipboard (auto-paste disabled)");
+                                pill_toast(&app_for_process, "Transcription copied", 1500);
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy text to clipboard: {}", e);
+                                pill_toast(&app_for_process, "Copy failed", 1500);
                             }
                         }
                     }

@@ -167,9 +167,9 @@ export function AudioUploadSection() {
   }, []);
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full min-h-0 flex flex-col">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-border/40">
+      <div className="shrink-0 px-6 py-4 border-b border-border/40">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Upload files</h1>
@@ -180,8 +180,8 @@ export function AudioUploadSection() {
         </div>
       </div>
 
-      <div className="flex-1 p-6">
-        <div className="space-y-6">
+      <ScrollArea className="flex-1 min-h-0">
+        <div className="p-6 space-y-6">
           {/* Upload Card */}
           <div className={cn(
             "rounded-lg border-2 bg-card overflow-hidden transition-all",
@@ -351,7 +351,7 @@ export function AudioUploadSection() {
             </div>
           </div>
         </div>
-      </div>
+      </ScrollArea>
     </div>
   );
 }

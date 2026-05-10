@@ -18,6 +18,74 @@ use enigo::{
 // Global flag to prevent concurrent text insertions
 static IS_INSERTING: AtomicBool = AtomicBool::new(false);
 
+/// Ensure prose ending in sentence punctuation has exactly one trailing space.
+///
+/// This is applied at the insertion boundary only, so stored transcription
+/// history remains clean. Rules:
+/// - `Hello world.` → `Hello world. `
+/// - `Hello world. ` → `Hello world. ` (normalize to one)
+/// - `Hello world` → `Hello world` (no sentence end, no space)
+/// - `https://example.com.` → `https://example.com.` (URL-like, skip)
+/// - `foo@bar.com.` → `foo@bar.com.` (email-like, skip)
+/// - `x = y.` → `x = y.` (code-like, skip)
+fn ensure_trailing_sentence_space(text: &str) -> String {
+    let without_trailing_spaces = text.trim_end_matches(' ');
+    if without_trailing_spaces.is_empty() {
+        return text.to_string();
+    }
+
+    // Preserve explicit structural whitespace. The helper is for ergonomic
+    // sentence spacing, not for rewriting multiline text or caller-provided
+    // newlines/tabs at the insertion boundary.
+    if without_trailing_spaces.ends_with('\n')
+        || without_trailing_spaces.ends_with('\r')
+        || without_trailing_spaces.ends_with('\t')
+        || without_trailing_spaces.contains('\n')
+        || without_trailing_spaces.contains('\r')
+    {
+        return text.to_string();
+    }
+
+    let closing_punctuation = ['"', '\'', '“', '”', '’', ')', ']', '}'];
+    let sentence_end = without_trailing_spaces
+        .chars()
+        .rev()
+        .find(|c| !closing_punctuation.contains(c));
+
+    // Only add space after sentence-ending punctuation, allowing closing
+    // quotes/brackets after the punctuation.
+    if !matches!(sentence_end, Some('.' | '!' | '?')) {
+        return text.to_string();
+    }
+
+    // Detect contexts where a trailing space would be harmful.
+    let semantic_end =
+        without_trailing_spaces.trim_end_matches(|c| closing_punctuation.contains(&c));
+    let before_period = semantic_end.strip_suffix('.').unwrap_or(semantic_end);
+    let looks_like_url = semantic_end.contains("://")
+        || before_period.ends_with(".com")
+        || before_period.ends_with(".org")
+        || before_period.ends_with(".net")
+        || before_period.ends_with(".io")
+        || before_period.ends_with(".dev")
+        || before_period.ends_with(".app");
+    // Email-like: contains @ with no spaces (even if followed by period)
+    let looks_like_email = before_period.contains('@') && !before_period.contains(' ');
+    let looks_like_code = semantic_end.contains('=')
+        || semantic_end.contains("->")
+        || semantic_end.contains("::")
+        || semantic_end.contains('{')
+        || semantic_end.contains('}')
+        || semantic_end.contains(';');
+
+    if looks_like_url || looks_like_email || looks_like_code {
+        return text.to_string();
+    }
+
+    // Preserve exactly one trailing space after the original closing punctuation.
+    format!("{} ", without_trailing_spaces)
+}
+
 #[tauri::command]
 pub async fn insert_text(app: tauri::AppHandle, text: String) -> Result<(), String> {
     // Check if already inserting text
@@ -54,10 +122,13 @@ pub async fn insert_text(app: tauri::AppHandle, text: String) -> Result<(), Stri
     };
 
     tokio::task::spawn_blocking(move || {
+        // Apply trailing sentence space only at the insertion boundary,
+        // so stored transcription history remains clean.
+        let insertable_text = ensure_trailing_sentence_space(&text);
         // Always use clipboard method for reliability and to prevent duplicate insertion
         // This function handles both copying to clipboard and pasting at cursor
         insert_via_clipboard(
-            text,
+            insertable_text,
             has_accessibility_permission,
             Some(app),
             keep_transcription_in_clipboard,
@@ -464,4 +535,163 @@ fn paste_linux() -> Result<(), SimulateError> {
     send_key_event(&EventType::KeyRelease(RdevKey::ControlLeft))?;
     log::debug!("Linux paste simulation completed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sentence_end_gets_trailing_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("Hello world."),
+            "Hello world. "
+        );
+    }
+
+    #[test]
+    fn exclamation_gets_trailing_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("That's great!"),
+            "That's great! "
+        );
+    }
+
+    #[test]
+    fn question_mark_gets_trailing_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("How are you?"),
+            "How are you? "
+        );
+    }
+
+    #[test]
+    fn existing_trailing_spaces_normalize_to_one() {
+        assert_eq!(
+            ensure_trailing_sentence_space("Hello world.   "),
+            "Hello world. "
+        );
+    }
+
+    #[test]
+    fn no_sentence_end_no_space() {
+        assert_eq!(ensure_trailing_sentence_space("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn comma_no_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("Hello world,"),
+            "Hello world,"
+        );
+    }
+
+    #[test]
+    fn url_no_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("Visit https://example.com."),
+            "Visit https://example.com."
+        );
+    }
+
+    #[test]
+    fn email_no_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("user@example.com."),
+            "user@example.com."
+        );
+    }
+
+    #[test]
+    fn code_like_no_space() {
+        assert_eq!(ensure_trailing_sentence_space("x = y."), "x = y.");
+    }
+
+    #[test]
+    fn multiline_no_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("Hello.\nWorld."),
+            "Hello.\nWorld."
+        );
+    }
+
+    #[test]
+    fn trailing_newline_is_preserved() {
+        assert_eq!(ensure_trailing_sentence_space("Hello.\n"), "Hello.\n");
+    }
+
+    #[test]
+    fn closing_quote_gets_trailing_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("He said \"yes.\""),
+            "He said \"yes.\" "
+        );
+    }
+
+    #[test]
+    fn curly_closing_quote_gets_trailing_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("He said “yes.”"),
+            "He said “yes.” "
+        );
+    }
+
+    #[test]
+    fn closing_paren_gets_trailing_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("That works (really!)"),
+            "That works (really!) "
+        );
+    }
+
+    #[test]
+    fn empty_string_unchanged() {
+        assert_eq!(ensure_trailing_sentence_space(""), "");
+    }
+
+    #[test]
+    fn only_whitespace_unchanged() {
+        assert_eq!(ensure_trailing_sentence_space("   "), "   ");
+    }
+
+    #[test]
+    fn tld_like_ending_no_space() {
+        // .com ending should not get a space (ambiguous with domain)
+        assert_eq!(
+            ensure_trailing_sentence_space("example.com."),
+            "example.com."
+        );
+    }
+
+    #[test]
+    fn normal_prose_with_period() {
+        // Normal dictation: sentence with a period
+        assert_eq!(
+            ensure_trailing_sentence_space("The quick brown fox jumps over the lazy dog."),
+            "The quick brown fox jumps over the lazy dog. "
+        );
+    }
+
+    #[test]
+    fn repeated_sentence_insertions_keep_boundaries() {
+        let combined = format!(
+            "{}{}{}",
+            ensure_trailing_sentence_space("This is the testing bro one two three."),
+            ensure_trailing_sentence_space("This is a testing blow one to three."),
+            ensure_trailing_sentence_space("This is a testing row on to three."),
+        );
+
+        assert_eq!(
+            combined,
+            "This is the testing bro one two three. This is a testing blow one to three. This is a testing row on to three. "
+        );
+    }
+
+    #[test]
+    fn code_assignment_sentence_like_no_space() {
+        assert_eq!(
+            ensure_trailing_sentence_space("result = ok."),
+            "result = ok."
+        );
+    }
 }

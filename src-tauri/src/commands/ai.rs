@@ -24,6 +24,7 @@ const LEGACY_OPENAI_NO_AUTH_KEY: &str = "ai_openai_no_auth";
 const AI_PROVIDER_KEYS: &[&str] = &[
     "ai_api_key_gemini",
     "ai_api_key_openai",
+    "ai_api_key_anthropic",
     "ai_api_key_custom",
 ];
 
@@ -259,7 +260,7 @@ lazy_static::lazy_static! {
 }
 
 // Supported AI providers
-const ALLOWED_PROVIDERS: &[&str] = &["gemini", "openai", "custom"];
+const ALLOWED_PROVIDERS: &[&str] = &["gemini", "openai", "anthropic", "custom"];
 
 fn validate_provider_name(provider: &str) -> Result<(), String> {
     // First check format
@@ -885,8 +886,9 @@ pub async fn enhance_transcription(text: String, app: tauri::AppHandle) -> Resul
         opts.insert("no_auth".into(), serde_json::Value::Bool(cached.is_none()));
 
         ("openai".to_string(), cached.unwrap_or_default(), opts)
-    } else if provider == "gemini" {
-        // Require API key from in-memory cache
+    } else if provider == "gemini" || provider == "anthropic" {
+        // Both providers read the key from the in-memory cache and skip the
+        // OpenAI-style probe at save time; first-use surfaces auth/model errors.
         let cache = API_KEY_CACHE
             .lock()
             .map_err(|_| "Failed to access cache".to_string())?;
@@ -1112,11 +1114,26 @@ const GEMINI_MODELS: &[(&str, &str, bool)] = &[
     ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", true),
 ];
 
+/// Curated list of Anthropic Claude models for text formatting
+/// Haiku 4.5 (fastest, cheapest) and Sonnet 4.6 (balanced).
+/// Opus is intentionally excluded - too slow/expensive for inline formatting.
+///
+/// Note: this list is intentionally narrower than
+/// `ai::anthropic::SUPPORTED_MODELS`, which also accepts `claude-sonnet-4-5`
+/// for back-compat with users who selected it during the 1.12.0/1.12.1 window.
+/// We deliberately do not re-advertise deprecated IDs in the dropdown - keep
+/// new selections on the current curated set.
+const ANTHROPIC_MODELS: &[(&str, &str, bool)] = &[
+    ("claude-haiku-4-5", "Claude Haiku 4.5", true),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6", false),
+];
+
 /// Get curated models for a provider (no API call needed)
 fn get_curated_models(provider: &str) -> Vec<ProviderModel> {
     let models: &[(&str, &str, bool)] = match provider {
         "openai" => OPENAI_MODELS,
         "gemini" => GEMINI_MODELS,
+        "anthropic" => ANTHROPIC_MODELS,
         _ => return vec![],
     };
 
@@ -1137,15 +1154,16 @@ pub async fn list_provider_models(
     provider: String,
     _app: tauri::AppHandle,
 ) -> Result<Vec<ProviderModel>, String> {
-    // Validate provider
-    if !["openai", "gemini"].contains(&provider.as_str()) {
+    // Drift-proof gate: a provider supports model listing iff it has a curated
+    // models entry in get_curated_models. Adding a new entry there is enough.
+    let models = get_curated_models(&provider);
+    if models.is_empty() {
         return Err(format!(
             "Unsupported provider for model listing: {}",
             provider
         ));
     }
 
-    let models = get_curated_models(&provider);
     log::info!(
         "Returning {} curated models for provider {}",
         models.len(),
@@ -1716,6 +1734,7 @@ mod tests {
         // Valid providers
         assert!(validate_provider_name("gemini").is_ok());
         assert!(validate_provider_name("openai").is_ok());
+        assert!(validate_provider_name("anthropic").is_ok());
         assert!(validate_provider_name("custom").is_ok());
 
         // Groq is no longer supported
@@ -1748,7 +1767,17 @@ mod tests {
             .iter()
             .any(|m| m.id == "gemini-2.5-flash-lite"));
 
-        // Unknown provider returns empty list
+        // Anthropic models
+        let anthropic_models = get_curated_models("anthropic");
+        assert_eq!(anthropic_models.len(), 2);
+        assert!(anthropic_models.iter().any(|m| m.id == "claude-haiku-4-5"));
+        assert!(anthropic_models.iter().any(|m| m.id == "claude-sonnet-4-6"));
+
+        // The list_provider_models gate uses is_empty() on this return,
+        // so providers without curated models (e.g. "custom", or anything
+        // unknown) get a model-listing error.
+        let custom_models = get_curated_models("custom");
+        assert!(custom_models.is_empty());
         let unknown_models = get_curated_models("unknown");
         assert!(unknown_models.is_empty());
     }

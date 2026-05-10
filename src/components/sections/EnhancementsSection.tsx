@@ -354,9 +354,9 @@ export function EnhancementsSection() {
     : getModels(aiSettings.provider).find(m => m.id === aiSettings.model)?.name || aiSettings.model;
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full min-h-0 flex flex-col">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-border/40">
+      <div className="shrink-0 px-6 py-4 border-b border-border/40">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Formatting</h1>
@@ -378,7 +378,7 @@ export function EnhancementsSection() {
         </div>
       </div>
 
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-6 space-y-6">
           {/* AI Providers Section */}
           <div className="space-y-4">
@@ -454,7 +454,7 @@ export function EnhancementsSection() {
                 <div className="space-y-2 flex-1">
                   <h3 className="font-medium text-sm">Quick Setup</h3>
                   <ol className="text-sm text-muted-foreground space-y-1.5 list-decimal list-inside">
-                    <li>Choose a provider above (OpenAI or Google)</li>
+                    <li>Choose a provider above (OpenAI, Anthropic, or Google)</li>
                     <li>Click "Add Key" and enter your API key</li>
                     <li>Select a model from the dropdown</li>
                     <li>Toggle "AI Formatting" on to enable</li>

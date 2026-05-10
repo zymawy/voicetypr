@@ -62,7 +62,7 @@ use commands::{
     debug::{debug_transcription_flow, test_transcription_event},
     device::get_device_id,
     keyring::{keyring_delete, keyring_get, keyring_has, keyring_set},
-    logs::{clear_old_logs, get_log_directory, open_logs_folder},
+    logs::{clear_old_logs, get_latest_log_for_bug_report, get_log_directory, open_logs_folder},
     meetings::{
         delete_meeting, get_meeting, list_meetings, rename_meeting, start_meeting, stop_meeting,
         summarize_meeting,
@@ -1198,6 +1198,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             keyring_has,
             validate_and_cache_soniox_key,
             clear_soniox_key_cache,
+            get_latest_log_for_bug_report,
             get_log_directory,
             open_logs_folder,
             get_autostart_status,

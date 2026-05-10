@@ -42,14 +42,15 @@ export const saveApiKey = async (provider: string, apiKey: string): Promise<void
   await keyringSet(key, apiKey);
   
   // Cache or validate depending on provider
-  if (provider === 'openai') {
+  const validated = provider === 'openai';
+  if (validated) {
     // OpenAI-compatible requires validation (may include no-auth path via separate modal)
     await invoke('validate_and_cache_api_key', { args: { provider, apiKey } });
   } else {
     await invoke('cache_ai_api_key', { args: { provider, apiKey } });
   }
-  
-  console.log(`[Keyring] API key saved and validated for ${provider}`);
+
+  console.log(`[Keyring] API key ${validated ? 'saved and validated' : 'saved and cached'} for ${provider}`);
   
   // Emit event to notify that API key was saved
   await emit('api-key-saved', { provider });
@@ -80,7 +81,7 @@ export const removeApiKey = async (provider: string): Promise<void> => {
 
 // Load all API keys to backend cache (for app startup)
 export const loadApiKeysToCache = async (): Promise<void> => {
-  const providers = ['gemini', 'openai', 'custom'];
+  const providers = ['gemini', 'openai', 'anthropic', 'custom'];
   
   for (const provider of providers) {
     try {

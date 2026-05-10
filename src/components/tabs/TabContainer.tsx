@@ -110,5 +110,5 @@ export function TabContainer({ activeSection }: TabContainerProps) {
     }
   };
 
-  return <div className="h-full flex flex-col">{renderTabContent()}</div>;
+  return <div className="h-full min-h-0 flex flex-col">{renderTabContent()}</div>;
 }

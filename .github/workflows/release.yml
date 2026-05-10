@@ -8,6 +8,7 @@ on:
         required: true
         type: choice
         options:
+          - current
           - patch
           - minor
           - major
@@ -41,6 +42,7 @@ jobs:
           CURRENT=$(node -p "require('./package.json').version")
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
           case "${{ inputs.release_type }}" in
+            current) NEW="$CURRENT" ;;
             major) NEW="$((MAJOR + 1)).0.0" ;;
             minor) NEW="${MAJOR}.$((MINOR + 1)).0" ;;
             patch) NEW="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
@@ -113,9 +115,6 @@ jobs:
 
             const cargo = fs.readFileSync(cargoPath, "utf8");
             const updated = cargo.replace(/^version = "[^"]*"/m, `version = "${version}"`);
-            if (updated === cargo) {
-              throw new Error("Failed to update version in src-tauri/Cargo.toml");
-            }
             fs.writeFileSync(cargoPath, updated);
           '
 
@@ -241,9 +240,6 @@ jobs:
 
             const cargo = fs.readFileSync(cargoPath, "utf8");
             const updated = cargo.replace(/^version = "[^"]*"/m, `version = "${version}"`);
-            if (updated === cargo) {
-              throw new Error("Failed to update version in src-tauri/Cargo.toml");
-            }
             fs.writeFileSync(cargoPath, updated);
           '
 
@@ -366,9 +362,6 @@ jobs:
 
           $cargoToml = Get-Content "src-tauri/Cargo.toml" -Raw
           $updated = [regex]::Replace($cargoToml, '(?m)^version = "[^"]*"', "version = `"$version`"", 1)
-          if ($updated -eq $cargoToml) {
-            throw "Failed to update version in src-tauri/Cargo.toml"
-          }
           Set-Content "src-tauri/Cargo.toml" $updated -Encoding utf8NoBOM
 
       - name: Ensure FFmpeg sidecar
@@ -487,9 +480,6 @@ jobs:
 
             const cargo = fs.readFileSync(cargoPath, "utf8");
             const updated = cargo.replace(/^version = "[^"]*"/m, `version = "${version}"`);
-            if (updated === cargo) {
-              throw new Error("Failed to update version in src-tauri/Cargo.toml");
-            }
             fs.writeFileSync(cargoPath, updated);
           '
 
@@ -498,9 +488,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json src-tauri/Cargo.toml
+          git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock CHANGELOG.md
           git diff --cached --stat
-          git commit -m "chore: release v${{ needs.prepare.outputs.version }}"
+          if git diff --cached --quiet; then
+            echo "No version file changes; tagging current commit"
+          else
+            git commit -m "chore: release v${{ needs.prepare.outputs.version }}"
+          fi
           git tag -a "${{ needs.prepare.outputs.tag }}" -m "Release ${{ needs.prepare.outputs.tag }}"
           git push origin main "${{ needs.prepare.outputs.tag }}"
           echo "ref=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT

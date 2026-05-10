@@ -20,8 +20,11 @@ import {
   Settings2,
   Sparkles,
   Video,
+  Bug,
 } from "lucide-react";
 
+import { useState } from "react";
+import { ReportBugDialog } from "@/components/ReportBugDialog";
 interface SidebarProps {
   activeSection: string;
   onSectionChange: (section: string) => void;
@@ -42,99 +45,117 @@ const mainSections = [
 const bottomSections = [{ id: "advanced", label: "Advanced", icon: Layers }];
 
 export function Sidebar({ activeSection, onSectionChange }: SidebarProps) {
+  const [showReportBugDialog, setShowReportBugDialog] = useState(false);
+
   return (
-    <SidebarPrimitive >
-      <SidebarContent className="px-2">
-        <SidebarGroup className="flex-1">
-          <SidebarMenu>
-            {mainSections.map((section) => {
-              const Icon = section.icon;
-              const isActive = activeSection === section.id;
-              return (
-                <SidebarMenuItem key={section.id}>
-                  <SidebarMenuButton
-                    onClick={() => onSectionChange(section.id)}
-                    isActive={isActive}
-                    className={cn(
-                      "group relative rounded-lg px-3 py-2 hover:bg-accent/50 transition-colors",
-                      isActive &&
-                        "bg-accent text-accent-foreground font-medium",
-                    )}
-                  >
-                    <Icon
+    <>
+      <SidebarPrimitive collapsible="none">
+        <SidebarContent className="px-2">
+          <SidebarGroup className="flex-1">
+            <SidebarMenu>
+              {mainSections.map((section) => {
+                const Icon = section.icon;
+                const isActive = activeSection === section.id;
+                return (
+                  <SidebarMenuItem key={section.id}>
+                    <SidebarMenuButton
+                      onClick={() => onSectionChange(section.id)}
+                      isActive={isActive}
                       className={cn(
-                        "h-4 w-4 transition-transform group-hover:scale-110",
-                        isActive && "text-primary",
+                        "group relative rounded-lg px-3 py-2 hover:bg-accent/50 transition-colors",
+                        isActive &&
+                          "bg-accent text-accent-foreground font-medium",
                       )}
-                    />
-                    <span className="ml-2">{section.label}</span>
-                    {isActive && (
-                      <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary rounded-r-full" />
-                    )}
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              );
-            })}
-          </SidebarMenu>
-        </SidebarGroup>
+                    >
+                      <Icon
+                        className={cn(
+                          "h-4 w-4 transition-transform group-hover:scale-110",
+                          isActive && "text-primary",
+                        )}
+                      />
+                      <span className="ml-2">{section.label}</span>
+                      {isActive && (
+                        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary rounded-r-full" />
+                      )}
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
+            </SidebarMenu>
+          </SidebarGroup>
 
-        <SidebarGroup>
-          <SidebarMenu>
-            {bottomSections.map((section) => {
-              const Icon = section.icon;
-              const isActive = activeSection === section.id;
-              return (
-                <SidebarMenuItem key={section.id}>
-                  <SidebarMenuButton
-                    onClick={() => onSectionChange(section.id)}
-                    isActive={isActive}
-                    className={cn(
-                      "group relative rounded-lg px-3 py-2 hover:bg-accent/50 transition-colors",
-                      isActive &&
-                        "bg-accent text-accent-foreground font-medium",
-                    )}
-                  >
-                    <Icon
+          <SidebarGroup>
+            <SidebarMenu>
+              {bottomSections.map((section) => {
+                const Icon = section.icon;
+                const isActive = activeSection === section.id;
+                return (
+                  <SidebarMenuItem key={section.id}>
+                    <SidebarMenuButton
+                      onClick={() => onSectionChange(section.id)}
+                      isActive={isActive}
                       className={cn(
-                        "h-4 w-4 transition-transform group-hover:scale-110",
-                        isActive && "text-primary",
+                        "group relative rounded-lg px-3 py-2 hover:bg-accent/50 transition-colors",
+                        isActive &&
+                          "bg-accent text-accent-foreground font-medium",
                       )}
-                    />
-                    <span className="ml-2">{section.label}</span>
-                    {isActive && (
-                      <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary rounded-r-full" />
-                    )}
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              );
-            })}
+                    >
+                      <Icon
+                        className={cn(
+                          "h-4 w-4 transition-transform group-hover:scale-110",
+                          isActive && "text-primary",
+                        )}
+                      />
+                      <span className="ml-2">{section.label}</span>
+                      {isActive && (
+                        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary rounded-r-full" />
+                      )}
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                );
+              })}
 
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                onClick={() => onSectionChange("help")}
-                isActive={activeSection === "help"}
-                className={cn(
-                  "group relative rounded-lg px-3 py-2 hover:bg-accent/50 transition-colors",
-                  activeSection === "help" &&
-                    "bg-accent text-accent-foreground font-medium",
-                )}
-              >
-                <HelpCircle
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  onClick={() => onSectionChange("help")}
+                  isActive={activeSection === "help"}
                   className={cn(
-                    "h-4 w-4 transition-transform group-hover:scale-110",
-                    activeSection === "help" && "text-primary",
+                    "group relative rounded-lg px-3 py-2 hover:bg-accent/50 transition-colors",
+                    activeSection === "help" &&
+                      "bg-accent text-accent-foreground font-medium",
                   )}
-                />
-                <span className="ml-2">Help</span>
-                {activeSection === "help" && (
-                  <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary rounded-r-full" />
-                )}
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarGroup>
-      </SidebarContent>
-      <SidebarFooter className="border-t border-border/40 p-3" />
-    </SidebarPrimitive>
+                >
+                  <HelpCircle
+                    className={cn(
+                      "h-4 w-4 transition-transform group-hover:scale-110",
+                      activeSection === "help" && "text-primary",
+                    )}
+                  />
+                  <span className="ml-2">Help</span>
+                  {activeSection === "help" && (
+                    <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-primary rounded-r-full" />
+                  )}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  onClick={() => setShowReportBugDialog(true)}
+                  className="group relative rounded-lg px-3 py-2 hover:bg-accent/50 transition-colors"
+                >
+                  <Bug className="h-4 w-4 transition-transform group-hover:scale-110" />
+                  <span className="ml-2">Report Bug</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarGroup>
+        </SidebarContent>
+        <SidebarFooter className="border-t border-border/40 p-3" />
+      </SidebarPrimitive>
+      <ReportBugDialog
+        isOpen={showReportBugDialog}
+        onClose={() => setShowReportBugDialog(false)}
+      />
+    </>
   );
 }

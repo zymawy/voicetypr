@@ -1,6 +1,5 @@
-import { useState, useEffect } from 'react';
-import { AlertTriangle, Bug, X, Copy, Check, ExternalLink } from 'lucide-react';
-import { open } from '@tauri-apps/plugin-shell';
+import { useRef, useState, useEffect } from 'react';
+import { AlertTriangle, X, Copy, Check, Send } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Dialog,
@@ -15,7 +14,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   CrashReportData,
   gatherCrashReportData,
-  generateGitHubIssueUrl,
+  submitCrashReport,
 } from '@/utils/crashReport';
 
 interface CrashReportDialogProps {
@@ -37,46 +36,128 @@ export function CrashReportDialog({
 }: CrashReportDialogProps) {
   const [crashData, setCrashData] = useState<CrashReportData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState('');
   const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const actionIdRef = useRef(0);
+
+  const clearCopyTimer = () => {
+    if (copiedTimerRef.current) {
+      clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = null;
+    }
+  };
+
+  const resetState = () => {
+    setCrashData(null);
+    setIsLoading(true);
+    setIsSubmitting(false);
+    setSubmitError('');
+    setCopied(false);
+    clearCopyTimer();
+  };
+
+  // Closing invalidates any in-flight gather/submit action. Reopening increments again in the effect below.
+  // The double increment is intentional: stale async completions must never update a fresh dialog session.
+  const handleClose = () => {
+    actionIdRef.current += 1;
+    resetState();
+    onClose();
+  };
+
+  const buildCopyDetails = (data: CrashReportData): string => {
+    const parts = [
+      `Error: ${data.errorMessage}`,
+      `Stack: ${data.errorStack || 'N/A'}`,
+      `App Version: ${data.appVersion}`,
+      `Platform: ${data.platform} ${data.osVersion}`,
+      `Architecture: ${data.architecture}`,
+      `Model: ${data.currentModel || 'None'}`,
+      `Timestamp: ${data.timestamp}`,
+    ];
+
+    if (data.logContent) {
+      parts.push('', 'Latest App Log:', data.logContent);
+    } else if (data.logStatusNote) {
+      parts.push('', `Latest App Log: ${data.logStatusNote}`);
+    }
+
+    return parts.join('\n');
+  };
+
 
   useEffect(() => {
-    if (isOpen && error) {
-      gatherCrashReportData(error, componentStack, currentModel)
-        .then(setCrashData)
-        .catch(console.error)
-        .finally(() => setIsLoading(false));
-    }
+    return () => clearCopyTimer();
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen || !error) return;
+
+    const actionId = actionIdRef.current + 1;
+    actionIdRef.current = actionId;
+    resetState();
+
+    gatherCrashReportData(error, componentStack, currentModel)
+      .then((data) => {
+        if (actionId === actionIdRef.current) {
+          setCrashData(data);
+        }
+      })
+      .catch((err) => {
+        if (actionId === actionIdRef.current) {
+          console.error(err);
+        }
+      })
+      .finally(() => {
+        if (actionId === actionIdRef.current) {
+          setIsLoading(false);
+        }
+      });
   }, [isOpen, error, componentStack, currentModel]);
 
-  const handleReportBug = async () => {
+  const handleSubmitReport = async () => {
     if (!crashData) return;
 
+    setSubmitError('');
+    setCopied(false);
+    clearCopyTimer();
+    const actionId = actionIdRef.current + 1;
+    actionIdRef.current = actionId;
+    setIsSubmitting(true);
     try {
-      const url = generateGitHubIssueUrl(crashData);
-      await open(url);
-      toast.success('Opening GitHub in browser...');
-    } catch (err) {
-      console.error('Failed to open GitHub:', err);
-      toast.error('Failed to open browser');
+      const result = await submitCrashReport(crashData);
+      if (actionId !== actionIdRef.current) return;
+
+      if (result.success) {
+        toast.success('Crash report submitted. Thank you.');
+        handleClose();
+        return;
+      }
+
+      setSubmitError(result.message || 'Failed to submit crash report. You can copy the details and send them manually.');
+      toast.error(result.message || 'Failed to submit crash report. Please copy the details instead.');
+    } finally {
+      if (actionId === actionIdRef.current) {
+        setIsSubmitting(false);
+      }
     }
   };
 
   const handleCopyDetails = async () => {
     if (!crashData) return;
 
-    const details = `Error: ${crashData.errorMessage}
-Stack: ${crashData.errorStack || 'N/A'}
-App Version: ${crashData.appVersion}
-Platform: ${crashData.platform} ${crashData.osVersion}
-Architecture: ${crashData.architecture}
-Model: ${crashData.currentModel || 'None'}
-Timestamp: ${crashData.timestamp}`;
+    const details = buildCopyDetails(crashData);
 
     try {
       await navigator.clipboard.writeText(details);
       setCopied(true);
       toast.success('Details copied to clipboard');
-      setTimeout(() => setCopied(false), 2000);
+      clearCopyTimer();
+      copiedTimerRef.current = setTimeout(() => {
+        setCopied(false);
+        copiedTimerRef.current = null;
+      }, 2000);
     } catch (err) {
       console.error('Failed to copy:', err);
       toast.error('Failed to copy details');
@@ -84,7 +165,7 @@ Timestamp: ${crashData.timestamp}`;
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open={isOpen} onOpenChange={(open) => !open && handleClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-destructive">
@@ -92,7 +173,8 @@ Timestamp: ${crashData.timestamp}`;
             Something went wrong
           </DialogTitle>
           <DialogDescription>
-            An unexpected error occurred. You can report this issue to help us fix it.
+            VoiceTypr hit an unexpected error. Submit a crash report with system info
+            and the latest app log so we can fix it.
           </DialogDescription>
         </DialogHeader>
 
@@ -152,7 +234,17 @@ Timestamp: ${crashData.timestamp}`;
                 </div>
               </div>
             </div>
+
+            {submitError && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3" role="alert">
+                <p className="text-xs text-destructive">{submitError}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  If this keeps happening, copy the crash details and send them manually.
+                </p>
+              </div>
+            )}
           </div>
+
         ) : (
           <div className="py-8 text-center text-muted-foreground">
             Failed to gather crash details
@@ -160,36 +252,38 @@ Timestamp: ${crashData.timestamp}`;
         )}
 
         <DialogFooter className="flex-col sm:flex-row gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleCopyDetails}
-            disabled={!crashData}
-            className="gap-2"
-          >
-            {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-            {copied ? 'Copied' : 'Copy Details'}
-          </Button>
+          {submitError && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCopyDetails}
+              disabled={!crashData || isSubmitting}
+              className="gap-2"
+            >
+              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              {copied ? 'Copied' : 'Copy Details'}
+            </Button>
+          )}
 
           <div className="flex gap-2 sm:ml-auto">
             {onRetry && (
-              <Button variant="outline" size="sm" onClick={onRetry}>
+              <Button variant="outline" size="sm" onClick={onRetry} disabled={isSubmitting}>
                 Try Again
               </Button>
             )}
-            <Button variant="ghost" size="sm" onClick={onClose}>
+            <Button variant="ghost" size="sm" onClick={handleClose}>
               <X className="h-4 w-4 mr-1" />
               Dismiss
             </Button>
             <Button
               size="sm"
-              onClick={handleReportBug}
-              disabled={!crashData}
+              onClick={handleSubmitReport}
+              disabled={!crashData || isLoading || isSubmitting}
+              aria-busy={isSubmitting}
               className="gap-2"
             >
-              <Bug className="h-4 w-4" />
-              Report Bug
-              <ExternalLink className="h-3 w-3" />
+              <Send className="h-4 w-4" />
+              {isSubmitting ? 'Submitting...' : 'Submit'}
             </Button>
           </div>
         </DialogFooter>

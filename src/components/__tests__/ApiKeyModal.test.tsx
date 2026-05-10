@@ -32,6 +32,15 @@ describe('ApiKeyModal', () => {
     expect(link.closest('a')).toHaveAttribute('href', 'https://aistudio.google.com/apikey');
   });
 
+  it('shows provider-specific link for Anthropic', () => {
+    render(<ApiKeyModal {...defaultProps} providerName="anthropic" />);
+
+    expect(screen.getByText('Add Anthropic API Key')).toBeInTheDocument();
+    const link = screen.getByText('Get your Anthropic API key');
+    expect(link).toBeInTheDocument();
+    expect(link.closest('a')).toHaveAttribute('href', 'https://console.anthropic.com/settings/keys');
+  });
+
   it('calls onSubmit with API key', async () => {
     const onSubmit = vi.fn();
     render(<ApiKeyModal {...defaultProps} onSubmit={onSubmit} />);

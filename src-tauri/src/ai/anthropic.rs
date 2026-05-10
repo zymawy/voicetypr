@@ -6,6 +6,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
+// Supported Anthropic models (curated for text formatting).
+// Aliases route to the latest snapshot, so they stay current without code changes.
+// Opus is intentionally excluded — too slow/expensive for inline formatting.
+const SUPPORTED_MODELS: &[&str] = &[
+    "claude-haiku-4-5",
+    "claude-sonnet-4-6",
+    // `claude-sonnet-4-5` is still a documented Anthropic API alias and is
+    // kept for users who selected it during 1.12.0/1.12.1 before the provider
+    // was removed. We deliberately do NOT carry the older `*-latest` curated
+    // IDs forward: they were never documented as valid Anthropic Messages API
+    // model identifiers, and accepting them here would mask a 404
+    // model_not_found at first formatting. Users still on those will see a
+    // clear \"Unsupported model\" error and reselect from the dropdown.
+    "claude-sonnet-4-5",
+];
+
 pub struct AnthropicProvider {
     api_key: String,
     model: String,
@@ -18,7 +34,19 @@ impl AnthropicProvider {
         model: String,
         options: HashMap<String, serde_json::Value>,
     ) -> Result<Self, AIError> {
-        // Validate API key format (basic check)
+        // Validate model
+        if !SUPPORTED_MODELS.contains(&model.as_str()) {
+            return Err(AIError::ValidationError(format!(
+                "Unsupported model: {}",
+                model
+            )));
+        }
+
+        // Basic API key sanity check (parity with Gemini).
+        // We deliberately do NOT enforce a `sk-ant-` prefix: Anthropic also issues
+        // admin-scoped keys with the same prefix, and a prefix gate would falsely
+        // reassure users that a malformed key is valid. Real auth failures surface
+        // on the first enhancement call.
         if api_key.trim().is_empty() || api_key.len() < MIN_API_KEY_LENGTH {
             return Err(AIError::ValidationError(
                 "Invalid API key format".to_string(),
@@ -105,13 +133,6 @@ impl AnthropicProvider {
     }
 }
 
-/// Config to disable extended thinking for fast text formatting
-#[derive(Serialize)]
-struct ThinkingConfig {
-    /// Set to 0 to disable extended thinking
-    budget_tokens: u32,
-}
-
 #[derive(Serialize)]
 struct AnthropicRequest {
     model: String,
@@ -121,9 +142,9 @@ struct AnthropicRequest {
     system: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    /// Disable extended thinking for simple text formatting tasks
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking: Option<ThinkingConfig>,
+    // Note: `thinking` is intentionally omitted. Claude defaults to thinking off,
+    // which matches our low-latency formatting target. Re-add it as a typed
+    // `{ type: "enabled" | "disabled", budget_tokens }` field if needed later.
 }
 
 #[derive(Serialize, Deserialize)]
@@ -180,10 +201,11 @@ impl AIProvider for AnthropicProvider {
                 role: "user".to_string(),
                 content: prompt,
             }],
-            system: Some("You are a careful text formatter that only returns the cleaned text per the provided rules.".to_string()),
+            system: Some(
+                "You are a careful text formatter that only returns the cleaned text per the provided rules."
+                    .to_string(),
+            ),
             temperature: Some(temperature.clamp(0.0, 1.0)),
-            // Omit thinking parameter to disable extended thinking for fast text formatting
-            thinking: None,
         };
 
         let api_response = self.make_request_with_retry(&request_body).await?;
@@ -222,19 +244,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_provider_creation() {
+    fn test_provider_creation_rejects_empty_key() {
         let result = AnthropicProvider::new(
             "".to_string(),
             "claude-haiku-4-5".to_string(),
             HashMap::new(),
         );
         assert!(result.is_err());
+    }
 
+    #[test]
+    fn test_provider_creation_rejects_unsupported_model() {
+        let result = AnthropicProvider::new(
+            "test_key_12345".to_string(),
+            "claude-opus-4-7".to_string(),
+            HashMap::new(),
+        );
+        assert!(result.is_err());
+
+        let result = AnthropicProvider::new(
+            "test_key_12345".to_string(),
+            "definitely-not-a-model".to_string(),
+            HashMap::new(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_provider_creation_accepts_valid_inputs() {
         let result = AnthropicProvider::new(
             "test_key_12345".to_string(),
             "claude-haiku-4-5".to_string(),
             HashMap::new(),
         );
         assert!(result.is_ok());
+
+        let result = AnthropicProvider::new(
+            "test_key_12345".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            HashMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_provider_creation_accepts_legacy_alias() {
+        // claude-sonnet-4-5 stays in SUPPORTED_MODELS for back-compat with
+        // users who selected it during the 1.12.0/1.12.1 window. If a future
+        // cleanup drops it, this test catches the regression.
+        let result = AnthropicProvider::new(
+            "test_key_12345".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            HashMap::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_provider_creation_rejects_undocumented_latest_aliases() {
+        // Pre-1.12.1 builds shipped these as the curated IDs, but they are
+        // not documented as valid Anthropic Messages API model identifiers.
+        // We intentionally fail fast with a clear "Unsupported model" error
+        // here rather than letting the upstream API return 404 model_not_found.
+        for stale in &["claude-haiku-4-5-latest", "claude-sonnet-4-5-latest"] {
+            let result = AnthropicProvider::new(
+                "test_key_12345".to_string(),
+                stale.to_string(),
+                HashMap::new(),
+            );
+            assert!(
+                result.is_err(),
+                "Undocumented alias {stale} should be rejected"
+            );
+        }
     }
 }

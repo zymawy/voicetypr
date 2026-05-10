@@ -1,3 +1,31 @@
+## [1.12.3](https://github.com/moinulmoin/voicetypr/compare/v1.12.2...v1.12.3) (2026-04-29)
+
+### Features
+
+* **settings:** add an auto-paste toggle so users can keep transcripts in history without automatically inserting them ([1c47ac3](https://github.com/moinulmoin/voicetypr/commit/1c47ac3))
+* **support:** add in-app bug and crash report submission with system info and the latest redacted app log excerpt ([77a9b26](https://github.com/moinulmoin/voicetypr/commit/77a9b26), [be90102](https://github.com/moinulmoin/voicetypr/commit/be90102))
+
+### Bug Fixes
+
+* **support:** harden report validation, stale-submit guards, fallback behavior, and log redaction for private report delivery ([b8291e3](https://github.com/moinulmoin/voicetypr/commit/b8291e3), [6953429](https://github.com/moinulmoin/voicetypr/commit/6953429), [fa45160](https://github.com/moinulmoin/voicetypr/commit/fa45160))
+* **ui:** restore scrolling for Upload, General, Help, Advanced, and Formatting settings pages after the sidebar layout changes ([551fc4e](https://github.com/moinulmoin/voicetypr/commit/551fc4e), [10eb66f](https://github.com/moinulmoin/voicetypr/commit/10eb66f))
+
+
+## [1.12.2](https://github.com/moinulmoin/voicetypr/compare/v1.12.1...v1.12.2) (2026-04-27)
+
+### Bug Fixes
+
+* **transcription:** fix truncation in long recordings and preserve explicit insertion boundaries ([4719f3d](https://github.com/moinulmoin/voicetypr/commit/4719f3d), [4627145](https://github.com/moinulmoin/voicetypr/commit/4627145))
+* **transcription:** preserve sentence spacing on insert and use compatible punctuation matching ([987d881](https://github.com/moinulmoin/voicetypr/commit/987d881), [bb63e21](https://github.com/moinulmoin/voicetypr/commit/bb63e21))
+* **recording:** harden push-to-talk startup, license fallback, and abort handling ([2205bc1](https://github.com/moinulmoin/voicetypr/commit/2205bc1), [d38f8cb](https://github.com/moinulmoin/voicetypr/commit/d38f8cb), [7328b5c](https://github.com/moinulmoin/voicetypr/commit/7328b5c), [aa30d5e](https://github.com/moinulmoin/voicetypr/commit/aa30d5e), [86d2f17](https://github.com/moinulmoin/voicetypr/commit/86d2f17))
+* **windows:** reduce Windows crash paths and bundle the WebView2 offline installer for clean first-run installs ([4719f3d](https://github.com/moinulmoin/voicetypr/commit/4719f3d), [8c58cd2](https://github.com/moinulmoin/voicetypr/commit/8c58cd2))
+* **ui:** keep sidebar navigation accessible and route settings navigation to the correct tab ([1d70be3](https://github.com/moinulmoin/voicetypr/commit/1d70be3))
+* **license:** show the Manage License button when a license is already active ([4719f3d](https://github.com/moinulmoin/voicetypr/commit/4719f3d))
+* **ai:** persist AI formatting across restart by warming cached credentials from secure storage ([482dacb](https://github.com/moinulmoin/voicetypr/commit/482dacb))
+* **updater:** remove stale v1 dialog config and use a versioned update marker for post-update UX ([ad84a1d](https://github.com/moinulmoin/voicetypr/commit/ad84a1d))
+* **autostart:** move autostart toggles to backend-owned commands for atomic OS state management ([9aa7bdd](https://github.com/moinulmoin/voicetypr/commit/9aa7bdd))
+
+
 ## [1.12.1](https://github.com/moinulmoin/voicetypr/compare/v1.12.0...v1.12.1) (2026-02-22)
 
 
