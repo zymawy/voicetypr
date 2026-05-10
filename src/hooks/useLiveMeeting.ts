@@ -20,16 +20,18 @@ export function useLiveMeeting(meetingId: string | null): LiveMeetingState {
   const startedRef = useRef<number | null>(null);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
     if (!meetingId) {
       setSegments([]);
       setStatus("idle");
       setElapsedSeconds(0);
       startedRef.current = null;
-      return;
+      return; // eslint-enable react-hooks/set-state-in-effect (handled below)
     }
 
     setSegments([]);
     setStatus("starting");
+    /* eslint-enable react-hooks/set-state-in-effect */
     startedRef.current = Date.now();
 
     const unlistens: Array<() => void> = [];

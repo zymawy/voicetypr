@@ -323,12 +323,13 @@ function DetailView({
             className="text-xl font-semibold h-auto py-1"
           />
         ) : (
-          <h2
-            className="text-xl font-semibold cursor-text hover:bg-accent/30 rounded px-1 -mx-1"
+          <button
+            type="button"
+            className="text-xl font-semibold cursor-text hover:bg-accent/30 rounded px-1 -mx-1 text-left bg-transparent border-0 p-0"
             onClick={() => setEditingTitle(true)}
           >
             {meeting.title}
-          </h2>
+          </button>
         )}
         <p className="text-sm text-muted-foreground">
           {formatRelativeDate(meeting.started_at)} · {formatDuration(meeting.duration_seconds)} ·{" "}
